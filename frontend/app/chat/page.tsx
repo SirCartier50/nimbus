@@ -149,11 +149,184 @@ function ActivityPanel({ entries }: { entries: ActivityEntry[] }) {
   );
 }
 
+// ── Editor Panel ─────────────────────────────────────────────────────────
+
+interface WorkspaceFile {
+  name: string;
+  size: number;
+}
+
+function EditorPanel({ onFileChange }: { onFileChange?: () => void }) {
+  const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [content, setContent] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const loadFiles = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/workspace/files`);
+      const data = await res.json();
+      setFiles(data.files || []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    loadFiles();
+    const id = setInterval(loadFiles, 4000);
+    return () => clearInterval(id);
+  }, [loadFiles]);
+
+  const openFile = async (name: string) => {
+    if (dirty && activeFile) {
+      await saveFile();
+    }
+    try {
+      const res = await fetch(`${API}/workspace/file/${encodeURIComponent(name)}`);
+      const data = await res.json();
+      if (data.success) {
+        setActiveFile(name);
+        setContent(data.content);
+        setDirty(false);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const saveFile = async () => {
+    if (!activeFile) return;
+    setSaving(true);
+    try {
+      await fetch(`${API}/workspace/file/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: activeFile, content }),
+      });
+      setDirty(false);
+      onFileChange?.();
+    } catch {
+      // ignore
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fileIcon = (name: string) => {
+    if (name.endsWith(".json")) return "{ }";
+    if (name.endsWith(".sh")) return "#!/";
+    if (name.endsWith(".yml") || name.endsWith(".yaml")) return "---";
+    if (name.endsWith(".py")) return "py";
+    if (name.endsWith(".md")) return "md";
+    if (name.endsWith(".ts") || name.endsWith(".tsx")) return "ts";
+    if (name.endsWith(".js") || name.endsWith(".jsx")) return "js";
+    return "txt";
+  };
+
+  return (
+    <div className="flex h-full flex-col border-t border-slate-800">
+      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2">
+        <div className="flex items-center gap-2">
+          <svg className="h-3.5 w-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+          </svg>
+          <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Editor
+          </span>
+          {activeFile && (
+            <span className="ml-1 font-mono text-[10px] text-slate-500">
+              {activeFile}{dirty ? " *" : ""}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          {dirty && (
+            <button
+              onClick={saveFile}
+              disabled={saving}
+              className="rounded bg-sky-500/20 px-2 py-0.5 text-[10px] font-medium text-sky-400 transition hover:bg-sky-500/30 disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save"}
+            </button>
+          )}
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="rounded p-1 text-slate-500 transition hover:bg-slate-800 hover:text-white"
+          >
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25H12" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        {sidebarOpen && (
+          <div className="w-36 shrink-0 overflow-y-auto border-r border-slate-800 bg-slate-950/80 py-1">
+            {files.length === 0 ? (
+              <p className="px-3 py-2 text-[10px] text-slate-600">No files yet</p>
+            ) : (
+              files.map((f) => (
+                <button
+                  key={f.name}
+                  onClick={() => openFile(f.name)}
+                  className={`flex w-full items-center gap-1.5 px-3 py-1 text-left text-[10px] transition ${
+                    activeFile === f.name
+                      ? "bg-sky-500/10 text-sky-300"
+                      : "text-slate-400 hover:bg-slate-800/50 hover:text-white"
+                  }`}
+                >
+                  <span className="shrink-0 font-mono text-[8px] font-bold text-slate-600">
+                    {fileIcon(f.name)}
+                  </span>
+                  <span className="truncate">{f.name}</span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+
+        <div className="flex-1 overflow-hidden">
+          {activeFile ? (
+            <textarea
+              value={content}
+              onChange={(e) => {
+                setContent(e.target.value);
+                setDirty(true);
+              }}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                  e.preventDefault();
+                  saveFile();
+                }
+              }}
+              spellCheck={false}
+              className="h-full w-full resize-none bg-slate-950 p-3 font-mono text-[11px] leading-relaxed text-slate-200 outline-none"
+            />
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center text-center">
+              <svg className="mb-2 h-5 w-5 text-slate-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+              </svg>
+              <p className="text-[10px] text-slate-600">Select a file to edit</p>
+              <p className="mt-0.5 text-[10px] text-slate-700">Deploy to generate files</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Terminal Panel ────────────────────────────────────────────────────────
 
 function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
   const [lines, setLines] = useState<TerminalLine[]>([]);
   const [input, setInput] = useState("");
+  const [cwd, setCwd] = useState("~");
   const [githubLinked, setGithubLinked] = useState(false);
   const [linkPrompt, setLinkPrompt] = useState(false);
   const [repoUrl, setRepoUrl] = useState("");
@@ -173,15 +346,15 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
   }, []);
 
   useEffect(() => {
-    addLine("system", "Nimbus Terminal v1.0 — Ready", "info");
-    addLine("system", "Type 'help' for available commands", "info");
+    addLine("system", "Nimbus Terminal v1.0", "info");
+    addLine("system", "Type 'help' for commands", "info");
 
     fetch(`${API}/workspace/github/status`)
       .then((r) => r.json())
       .then((data) => {
         if (data.linked) {
           setGithubLinked(true);
-          addLine("git", `Connected to ${data.repo_url} (${data.branch})`, "info");
+          addLine("git", `Connected to ${data.repo_url}`, "info");
         }
       })
       .catch(() => {});
@@ -193,7 +366,6 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
         const res = await fetch(`${API}/dashboard/bodyguard`);
         if (!res.ok) return;
         const data: BodyguardStatus = await res.json();
-
         data.recent_logs.forEach((log) => {
           const key = `${log.timestamp}-${log.message}`;
           if (!seenLogsRef.current.has(key)) {
@@ -201,19 +373,8 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
             addLine("aws", `[bodyguard] ${log.message}`, log.level === "error" ? "error" : "output");
           }
         });
-
-        data.unread_alerts.forEach((alert) => {
-          const key = `alert-${alert.id}`;
-          if (!seenLogsRef.current.has(key)) {
-            seenLogsRef.current.add(key);
-            addLine("aws", `[ALERT] ${alert.message}`, "error");
-          }
-        });
-      } catch {
-        // silently ignore
-      }
+      } catch { /* ignore */ }
     };
-
     poll();
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
@@ -231,6 +392,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
         body: JSON.stringify({ command }),
       });
       const data = await res.json();
+      if (data.cwd) setCwd(data.cwd);
       if (data.output) {
         const source = command.startsWith("git") ? "git" as const : "system" as const;
         data.output.split("\n").forEach((line: string) => {
@@ -243,7 +405,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
   };
 
   const linkGitHub = async (url: string) => {
-    addLine("git", `Linking repository: ${url}`, "info");
+    addLine("git", `Linking: ${url}`, "info");
     try {
       const res = await fetch(`${API}/workspace/github/link`, {
         method: "POST",
@@ -254,8 +416,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
       if (data.success) {
         setGithubLinked(true);
         addLine("git", data.message, "output");
-        addLine("git", `Workspace: ${data.workspace}`, "info");
-        addLine("system", "You can now use git commands: git add, git commit, git push", "info");
+        addLine("system", "Use git commands to manage your repo", "info");
       } else {
         addLine("git", `Failed: ${data.message}`, "error");
       }
@@ -268,98 +429,71 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
     const trimmed = cmd.trim();
     if (!trimmed) return;
     setInput("");
-
-    addLine("user", `$ ${trimmed}`, "input");
+    addLine("user", `${cwd} $ ${trimmed}`, "input");
 
     const parts = trimmed.split(/\s+/);
     const command = parts[0].toLowerCase();
 
-    switch (command) {
-      case "help":
-        addLine("system", "Available commands:", "info");
-        addLine("system", "  help                  Show this message", "info");
-        addLine("system", "  ls                    List workspace files", "info");
-        addLine("system", "  cat <file>            View file contents", "info");
-        addLine("system", "  git status            Show git status", "info");
-        addLine("system", "  git add .             Stage all files", "info");
-        addLine("system", "  git commit -m \"msg\"   Commit changes", "info");
-        addLine("system", "  git push              Push to remote", "info");
-        addLine("system", "  git log --oneline     View commit history", "info");
-        addLine("system", "  github link <url>     Link a GitHub repo", "info");
-        addLine("system", "  github status         Show GitHub connection", "info");
-        addLine("system", "  files                 List generated files", "info");
-        addLine("system", "  logs                  Show recent agent activity", "info");
-        addLine("system", "  clear                 Clear terminal", "info");
-        break;
-
-      case "clear":
-        setLines([]);
-        lineIdRef.current = 0;
-        seenLogsRef.current.clear();
-        break;
-
-      case "logs":
-        if (activity.length === 0) {
-          addLine("system", "No agent activity yet", "info");
+    if (command === "help") {
+      addLine("system", "Commands: cd, ls, cat, mkdir, touch, rm, mv, cp, echo,", "info");
+      addLine("system", "  grep, find, chmod, head, tail, wc, diff, tree, pwd", "info");
+      addLine("system", "  git [any subcommand]  — full git support", "info");
+      addLine("system", "  github link <url>     — link GitHub repo", "info");
+      addLine("system", "  github status         — connection info", "info");
+      addLine("system", "  files                 — list workspace files", "info");
+      addLine("system", "  logs                  — recent agent activity", "info");
+      addLine("system", "  clear                 — clear terminal", "info");
+      return;
+    }
+    if (command === "clear") {
+      setLines([]);
+      lineIdRef.current = 0;
+      seenLogsRef.current.clear();
+      return;
+    }
+    if (command === "logs") {
+      if (activity.length === 0) {
+        addLine("system", "No agent activity yet", "info");
+      } else {
+        activity.slice(-10).forEach((e) => {
+          addLine("system", `[${e.agent}] ${e.message}`, e.type === "error" ? "error" : "output");
+        });
+      }
+      return;
+    }
+    if (command === "files") {
+      try {
+        const res = await fetch(`${API}/workspace/files`);
+        const data = await res.json();
+        if (!data.files.length) {
+          addLine("system", "No files yet. Deploy from chat to generate.", "info");
         } else {
-          activity.slice(-10).forEach((e) => {
-            addLine("system", `[${e.agent}] ${e.message}`, e.type === "error" ? "error" : "output");
+          data.files.forEach((f: { name: string; size: number }) => {
+            addLine("system", `  ${f.name}  (${f.size}B)`, "output");
           });
         }
-        break;
-
-      case "files":
-        try {
-          const res = await fetch(`${API}/workspace/files`);
-          const data = await res.json();
-          if (data.files.length === 0) {
-            addLine("system", "No files in workspace yet. Deploy something from the chat first.", "info");
-          } else {
-            addLine("system", `Workspace: ${data.workspace}`, "info");
-            data.files.forEach((f: { name: string; size: number }) => {
-              addLine("system", `  ${f.name}  (${f.size} bytes)`, "output");
-            });
-          }
-        } catch {
-          addLine("system", "Could not reach backend", "error");
-        }
-        break;
-
-      case "github":
-        if (parts[1] === "link" && parts[2]) {
-          await linkGitHub(parts[2]);
-        } else if (parts[1] === "link") {
-          setLinkPrompt(true);
-          addLine("system", "Enter your repository URL above", "info");
-        } else if (parts[1] === "status") {
-          try {
-            const res = await fetch(`${API}/workspace/github/status`);
-            const data = await res.json();
-            if (data.linked) {
-              addLine("git", `Connected: ${data.repo_url}`, "output");
-              addLine("git", `Branch: ${data.branch}`, "output");
-              addLine("git", `Workspace: ${data.workspace}`, "output");
-            } else {
-              addLine("git", "Not linked. Run: github link <repo-url>", "info");
-            }
-          } catch {
-            addLine("system", "Could not reach backend", "error");
-          }
-        } else {
-          addLine("system", "Usage: github link <url> | github status", "info");
-        }
-        break;
-
-      case "git":
-      case "ls":
-      case "cat":
-      case "pwd":
-        await execBackend(trimmed);
-        break;
-
-      default:
-        addLine("system", `Unknown command: '${command}'. Type 'help' for available commands.`, "error");
+      } catch { addLine("system", "Could not reach backend", "error"); }
+      return;
     }
+    if (command === "github") {
+      if (parts[1] === "link" && parts[2]) {
+        await linkGitHub(parts[2]);
+      } else if (parts[1] === "link") {
+        setLinkPrompt(true);
+        addLine("system", "Enter repo URL above", "info");
+      } else if (parts[1] === "status") {
+        try {
+          const res = await fetch(`${API}/workspace/github/status`);
+          const data = await res.json();
+          addLine("git", data.linked ? `${data.repo_url} (${data.branch})` : "Not linked", "output");
+        } catch { addLine("system", "Could not reach backend", "error"); }
+      } else {
+        addLine("system", "Usage: github link <url> | github status", "info");
+      }
+      return;
+    }
+
+    await execBackend(trimmed);
   };
 
   const lineColor = (type: TerminalLine["type"]) => {
@@ -382,43 +516,32 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
 
   return (
     <div className="flex h-full flex-col border-t border-slate-800">
-      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2">
+      <div className="flex items-center justify-between border-b border-slate-800 px-3 py-1.5">
         <div className="flex items-center gap-2">
-          <svg className="h-3.5 w-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <svg className="h-3 w-3 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="m6.75 7.5 3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
           </svg>
-          <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Terminal
-          </span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Terminal</span>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              if (githubLinked) {
-                addLine("git", "Use 'github status' to view connection", "info");
-              } else {
-                setLinkPrompt(true);
-              }
-            }}
-            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition ${
-              githubLinked
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                : "border-slate-700 bg-slate-800/50 text-slate-500 hover:text-white"
-            }`}
-          >
-            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
-            </svg>
-            {githubLinked ? "Connected" : "Link GitHub"}
-          </button>
-        </div>
+        <button
+          onClick={() => {
+            if (!githubLinked) setLinkPrompt(true);
+          }}
+          className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[9px] font-medium transition ${
+            githubLinked
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+              : "border-slate-700 bg-slate-800/50 text-slate-500 hover:text-white"
+          }`}
+        >
+          <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+          </svg>
+          {githubLinked ? "Linked" : "GitHub"}
+        </button>
       </div>
 
       {linkPrompt && !githubLinked && (
-        <div className="flex items-center gap-2 border-b border-slate-800 bg-slate-900/80 px-4 py-2">
-          <svg className="h-3.5 w-3.5 shrink-0 text-amber-400" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
-          </svg>
+        <div className="flex items-center gap-2 border-b border-slate-800 bg-slate-900/80 px-3 py-1.5">
           <form
             onSubmit={async (e) => {
               e.preventDefault();
@@ -428,35 +551,24 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
                 setRepoUrl("");
               }
             }}
-            className="flex flex-1 items-center gap-2"
+            className="flex flex-1 items-center gap-1.5"
           >
             <input
               value={repoUrl}
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder="https://github.com/user/repo.git"
-              className="flex-1 rounded bg-slate-800 px-2 py-1 font-mono text-[11px] text-white placeholder-slate-600 outline-none focus:ring-1 focus:ring-amber-500/30"
+              className="flex-1 rounded bg-slate-800 px-2 py-0.5 font-mono text-[10px] text-white placeholder-slate-600 outline-none focus:ring-1 focus:ring-amber-500/30"
               autoFocus
             />
-            <button
-              type="submit"
-              className="rounded bg-amber-500/20 px-2 py-1 text-[10px] font-medium text-amber-400 transition hover:bg-amber-500/30"
-            >
-              Link
-            </button>
-            <button
-              type="button"
-              onClick={() => { setLinkPrompt(false); setRepoUrl(""); }}
-              className="text-[10px] text-slate-500 hover:text-white"
-            >
-              Cancel
-            </button>
+            <button type="submit" className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-medium text-amber-400 hover:bg-amber-500/30">Link</button>
+            <button type="button" onClick={() => { setLinkPrompt(false); setRepoUrl(""); }} className="text-[9px] text-slate-500 hover:text-white">Cancel</button>
           </form>
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto bg-slate-950 p-3 font-mono text-[11px] leading-relaxed">
+      <div className="flex-1 overflow-y-auto bg-slate-950 px-3 py-2 font-mono text-[11px] leading-relaxed">
         {lines.map((line) => (
-          <div key={line.id} className={`flex gap-2 py-0.5 ${lineColor(line.type)}`}>
+          <div key={line.id} className={`flex gap-1.5 py-px ${lineColor(line.type)}`}>
             {line.type !== "input" && sourceTag(line.source) && (
               <span className="shrink-0 select-none">[{sourceTag(line.source)}]</span>
             )}
@@ -467,18 +579,15 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
       </div>
 
       <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          handleCommand(input);
-        }}
-        className="flex items-center border-t border-slate-800 bg-slate-950 px-3 py-2"
+        onSubmit={(e) => { e.preventDefault(); handleCommand(input); }}
+        className="flex items-center border-t border-slate-800 bg-slate-950 px-3 py-1.5"
       >
-        <span className="mr-2 font-mono text-[11px] text-sky-400 select-none">$</span>
+        <span className="mr-1.5 font-mono text-[10px] text-emerald-400 select-none">{cwd} $</span>
         <input
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="git status, ls, help..."
+          placeholder="command..."
           className="flex-1 bg-transparent font-mono text-[11px] text-white placeholder-slate-600 outline-none"
         />
       </form>
@@ -910,12 +1019,15 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* ── Right panel: Activity + Terminal ── */}
-        <div className="hidden w-[420px] flex-col bg-slate-950/50 lg:flex">
-          <div className="flex h-[40%] flex-col overflow-hidden">
+        {/* ── Right panel: Activity + Editor + Terminal ── */}
+        <div className="hidden w-[480px] flex-col bg-slate-950/50 lg:flex">
+          <div className="flex h-[25%] flex-col overflow-hidden">
             <ActivityPanel entries={activity} />
           </div>
-          <div className="flex h-[60%] flex-col overflow-hidden">
+          <div className="flex h-[40%] flex-col overflow-hidden">
+            <EditorPanel />
+          </div>
+          <div className="flex h-[35%] flex-col overflow-hidden">
             <TerminalPanel activity={activity} />
           </div>
         </div>

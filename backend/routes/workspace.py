@@ -12,24 +12,35 @@ router = APIRouter()
 
 _workspace: dict = {
     "path": None,
+    "cwd": None,
     "github_url": None,
     "initialized": False,
 }
 
 ALLOWED_COMMANDS = {
-    "git": True,
-    "ls": True,
-    "cat": True,
-    "pwd": True,
-    "tree": True,
+    "git", "ls", "cat", "pwd", "tree", "mkdir", "touch",
+    "rm", "mv", "cp", "echo", "head", "tail", "wc",
+    "grep", "find", "chmod", "diff",
 }
+
+BLOCKED_GIT = {"push --force", "reset --hard", "clean -fd"}
 
 
 def _get_or_create_workspace() -> str:
     if not _workspace["path"] or not os.path.exists(_workspace["path"]):
         _workspace["path"] = tempfile.mkdtemp(prefix="nimbus-workspace-")
+        _workspace["cwd"] = _workspace["path"]
         _workspace["initialized"] = False
     return _workspace["path"]
+
+
+def _get_cwd() -> str:
+    ws = _get_or_create_workspace()
+    cwd = _workspace.get("cwd") or ws
+    if not os.path.exists(cwd):
+        _workspace["cwd"] = ws
+        cwd = ws
+    return cwd
 
 
 def _run(cmd: list[str], cwd: str, timeout: int = 15) -> dict:
@@ -53,6 +64,15 @@ def _run(cmd: list[str], cwd: str, timeout: int = 15) -> dict:
         return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1}
 
 
+def _resolve_path(target: str) -> str:
+    cwd = _get_cwd()
+    ws = _workspace["path"]
+    resolved = os.path.normpath(os.path.join(cwd, target))
+    if not resolved.startswith(ws):
+        return ws
+    return resolved
+
+
 class ExecRequest(BaseModel):
     command: str
 
@@ -67,29 +87,47 @@ class WriteFilesRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class SaveFileRequest(BaseModel):
+    filename: str
+    content: str
+
+
 @router.post("/workspace/exec")
 async def exec_command(req: ExecRequest):
     ws = _get_or_create_workspace()
-    parts = req.command.strip().split()
+    cwd = _get_cwd()
+    raw = req.command.strip()
 
-    if not parts:
+    if not raw:
         return {"success": False, "output": "Empty command"}
 
+    parts = raw.split()
     base_cmd = parts[0]
+
+    if base_cmd == "cd":
+        target = parts[1] if len(parts) > 1 else ws
+        if target == "~" or target == "/":
+            target = ws
+        resolved = _resolve_path(target)
+        if os.path.isdir(resolved):
+            _workspace["cwd"] = resolved
+            rel = os.path.relpath(resolved, ws)
+            display = "~" if rel == "." else f"~/{rel}"
+            return {"success": True, "output": display, "cwd": display}
+        return {"success": False, "output": f"cd: no such directory: {target}"}
 
     if base_cmd not in ALLOWED_COMMANDS:
         return {
             "success": False,
-            "output": f"Command '{base_cmd}' not allowed. Allowed: {', '.join(ALLOWED_COMMANDS.keys())}",
+            "output": f"Command '{base_cmd}' not allowed. Allowed: cd, {', '.join(sorted(ALLOWED_COMMANDS))}",
         }
 
     if base_cmd == "git" and len(parts) > 1:
-        dangerous = {"push --force", "reset --hard", "clean -fd"}
         subcmd = " ".join(parts[1:3])
-        if subcmd in dangerous:
+        if subcmd in BLOCKED_GIT:
             return {"success": False, "output": f"'{subcmd}' is blocked for safety"}
 
-    result = _run(parts, ws)
+    result = _run(parts, cwd)
 
     output = result["stdout"]
     if result["stderr"] and not result["success"]:
@@ -97,10 +135,14 @@ async def exec_command(req: ExecRequest):
     elif result["stderr"]:
         output = f"{output}\n{result['stderr']}" if output else result["stderr"]
 
+    rel = os.path.relpath(cwd, ws)
+    display_cwd = "~" if rel == "." else f"~/{rel}"
+
     return {
         "success": result["success"],
         "output": output or ("(no output)" if result["success"] else "Command failed"),
         "exit_code": result["exit_code"],
+        "cwd": display_cwd,
     }
 
 
@@ -127,12 +169,14 @@ async def link_github(req: GitHubLinkRequest):
         result = _run(["git", "clone", req.repo_url, os.path.basename(ws)], parent, timeout=30)
         if not result["success"]:
             _workspace["path"] = tempfile.mkdtemp(prefix="nimbus-workspace-")
+            _workspace["cwd"] = _workspace["path"]
             return {"success": False, "message": f"Clone failed: {result['stderr']}"}
 
         if req.branch != "main":
             _run(["git", "checkout", "-b", req.branch], ws)
 
     _workspace["github_url"] = req.repo_url
+    _workspace["cwd"] = ws
     _workspace["initialized"] = True
 
     return {
@@ -167,16 +211,14 @@ async def write_files(req: WriteFilesRequest):
 
     for filename, content in req.files.items():
         filepath = os.path.join(ws, filename)
-        os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) != ws else None
+        dirpath = os.path.dirname(filepath)
+        if dirpath != ws:
+            os.makedirs(dirpath, exist_ok=True)
         with open(filepath, "w") as f:
             f.write(content)
         written.append(filename)
 
-    return {
-        "success": True,
-        "workspace": ws,
-        "files_written": written,
-    }
+    return {"success": True, "workspace": ws, "files_written": written}
 
 
 @router.get("/workspace/files")
@@ -187,16 +229,13 @@ async def list_files():
 
     files = []
     for root, dirs, filenames in os.walk(ws):
-        dirs[:] = [d for d in dirs if d != ".git"]
+        dirs[:] = [d for d in dirs if d != ".git" and d != "__pycache__"]
         for name in filenames:
             full = os.path.join(root, name)
             rel = os.path.relpath(full, ws)
-            files.append({
-                "name": rel,
-                "size": os.path.getsize(full),
-            })
+            files.append({"name": rel, "size": os.path.getsize(full)})
 
-    return {"files": files, "workspace": ws}
+    return {"files": sorted(files, key=lambda f: f["name"]), "workspace": ws}
 
 
 @router.get("/workspace/file/{filename:path}")
@@ -209,7 +248,27 @@ async def read_file(filename: str):
     if not os.path.exists(filepath) or not filepath.startswith(ws):
         return {"success": False, "content": "File not found"}
 
-    with open(filepath, "r") as f:
-        content = f.read()
+    try:
+        with open(filepath, "r") as f:
+            content = f.read()
+        return {"success": True, "content": content, "filename": filename}
+    except UnicodeDecodeError:
+        return {"success": False, "content": "(binary file)"}
 
-    return {"success": True, "content": content, "filename": filename}
+
+@router.post("/workspace/file/save")
+async def save_file(req: SaveFileRequest):
+    ws = _get_or_create_workspace()
+    filepath = os.path.join(ws, req.filename)
+
+    if not filepath.startswith(ws):
+        return {"success": False, "message": "Invalid path"}
+
+    dirpath = os.path.dirname(filepath)
+    if dirpath != ws:
+        os.makedirs(dirpath, exist_ok=True)
+
+    with open(filepath, "w") as f:
+        f.write(req.content)
+
+    return {"success": True, "filename": req.filename, "size": len(req.content)}
