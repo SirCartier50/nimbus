@@ -47,23 +47,37 @@ User → Chat UI → Architect Agent (Amazon Nova via Bedrock)
               Bodyguard Agent (background monitoring)
 ```
 
+## Prerequisites
+
+- Python 3.10+
+- Node.js 18+
+- An AWS account with access keys (IAM user with `PowerUserAccess`)
+- A [Clerk](https://clerk.com) account (free tier works)
+
 ## Getting Started
+
+```bash
+git clone https://github.com/SirCartier50/nimbus.git
+cd nimbus
+```
 
 ### Backend
 ```bash
 cd backend
 pip install -r requirements.txt
-cp .env.example .env  # Add your AWS credentials
+cp .env.example .env        # Then fill in your AWS credentials
 uvicorn main:app --reload --port 8000
 ```
 
-### Frontend
+### Frontend (in a separate terminal)
 ```bash
 cd frontend
 npm install
-cp .env.local.example .env.local  # Add your Clerk keys
+cp .env.local.example .env.local   # Then fill in your Clerk keys
 npm run dev
 ```
+
+Open [http://localhost:3000](http://localhost:3000) — sign up, connect your AWS account in Settings, and start chatting.
 
 ## Category
 
