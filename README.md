@@ -1,4 +1,4 @@
-# Nimbus — Agentic AWS Management System
+# Nimbus AI — Agentic AWS Management System
 
 Nimbus lets anyone deploy and manage AWS infrastructure using plain English. Three AI agents powered by Amazon Nova via Amazon Bedrock handle the complexity so beginners don't have to.
 
