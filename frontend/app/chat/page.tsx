@@ -346,7 +346,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
   }, []);
 
   useEffect(() => {
-    addLine("system", "Nimbus Terminal v1.0", "info");
+    addLine("system", "Nimbus AI Terminal v1.0", "info");
     addLine("system", "Type 'help' for commands", "info");
 
     fetch(`${API}/workspace/github/status`)
@@ -838,7 +838,7 @@ export default function ChatPage() {
     {
       role: "assistant",
       content:
-        "Hey! I'm Nimbus. Tell me what you want to build on AWS and I'll design the architecture for you.\n\nYou can say things like:\n**\"I need a REST API with a database\"**\n**\"Set up a static website with storage\"**\n**\"Create a serverless function that runs every hour\"**",
+        "Hey! I'm Nimbus AI. Tell me what you want to build on AWS and I'll design the architecture for you.\n\nYou can say things like:\n**\"I need a REST API with a database\"**\n**\"Set up a static website with storage\"**\n**\"Create a serverless function that runs every hour\"**",
       timestamp: Date.now(),
     },
   ]);

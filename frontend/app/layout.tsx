@@ -8,7 +8,7 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Nimbus — Deploy AWS in Plain English",
+  title: "Nimbus AI — Deploy AWS in Plain English",
   description:
     "AI-powered AWS infrastructure manager. Three intelligent agents design, deploy, and protect your cloud.",
 };

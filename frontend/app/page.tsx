@@ -159,7 +159,7 @@ export default function HeroPage() {
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
           <Link href="/" className="flex items-center gap-3">
             <NimbusIcon size={36} />
-            <span className="text-lg font-semibold text-white">Nimbus</span>
+            <span className="text-lg font-semibold text-white">Nimbus AI</span>
           </Link>
 
           <div className="flex items-center gap-4">
@@ -420,7 +420,7 @@ export default function HeroPage() {
         <div className="mx-auto flex max-w-7xl items-center justify-between">
           <div className="flex items-center gap-2">
             <NimbusIcon size={24} />
-            <span className="text-sm text-slate-500">Nimbus</span>
+            <span className="text-sm text-slate-500">Nimbus AI</span>
           </div>
           <p className="text-sm text-slate-600">
             Built for the Amazon Nova AI Hackathon

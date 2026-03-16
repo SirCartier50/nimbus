@@ -23,7 +23,7 @@ export default function Navbar() {
         <div className="flex items-center gap-8">
           <Link href="/dashboard" className="flex items-center gap-3">
             <NimbusIcon size={32} />
-            <span className="text-lg font-semibold text-white">Nimbus</span>
+            <span className="text-lg font-semibold text-white">Nimbus AI</span>
           </Link>
 
           <div className="flex items-center gap-1">

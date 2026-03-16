@@ -21,8 +21,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Nimbus",
-    description="Agentic AWS Management System — Amazon Nova Hackathon",
+    title="Nimbus AI",
+    description="Agentic AWS Management System — Amazon Nova AI Hackathon",
     version="1.0.0",
     lifespan=lifespan,
 )

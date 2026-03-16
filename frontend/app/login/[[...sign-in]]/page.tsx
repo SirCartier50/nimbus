@@ -20,7 +20,7 @@ export default function LoginPage() {
         {/* Logo */}
         <Link href="/" className="relative z-10 flex items-center gap-3">
           <NimbusIcon size={40} />
-          <span className="text-xl font-semibold text-white">Nimbus</span>
+          <span className="text-xl font-semibold text-white">Nimbus AI</span>
         </Link>
 
         {/* Headline */}
@@ -65,10 +65,10 @@ export default function LoginPage() {
           <div className="border-l-2 border-sky-500/30 pl-4">
             <p className="text-sm italic text-slate-400">
               &ldquo;I just wanted to host a project. AWS had 200+ services and
-              I ended up with surprise charges. Nimbus exists so nobody has to
+              I ended up with surprise charges. Nimbus AI exists so nobody has to
               go through that.&rdquo;
             </p>
-            <p className="mt-2 text-xs text-slate-500">— The Nimbus Team</p>
+            <p className="mt-2 text-xs text-slate-500">— The Nimbus AI Team</p>
           </div>
         </motion.div>
       </div>
@@ -89,7 +89,7 @@ export default function LoginPage() {
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-cyan-400 text-base font-bold text-white shadow-lg shadow-sky-500/25">
               N
             </div>
-            <span className="text-xl font-semibold text-white">Nimbus</span>
+            <span className="text-xl font-semibold text-white">Nimbus AI</span>
           </Link>
         </motion.div>
 

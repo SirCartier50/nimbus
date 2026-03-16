@@ -54,7 +54,7 @@ export default function AWSGate({ children }: AWSGateProps) {
           <div className="mb-4 text-4xl">⚠️</div>
           <h2 className="text-xl font-bold text-white">Backend Unavailable</h2>
           <p className="mt-2 text-sm text-slate-400">
-            Cannot reach the Nimbus backend. Make sure it&apos;s running on port 8000.
+            Cannot reach the Nimbus AI backend. Make sure it&apos;s running on port 8000.
           </p>
           <p className="mt-4 rounded-lg bg-slate-800/50 p-3 font-mono text-xs text-slate-500">
             uvicorn main:app --reload --port 8000
@@ -88,7 +88,7 @@ export default function AWSGate({ children }: AWSGateProps) {
             <NimbusIcon size={56} />
           </div>
 
-          <h1 className="text-3xl font-bold text-white">Welcome to Nimbus</h1>
+          <h1 className="text-3xl font-bold text-white">Welcome to Nimbus AI</h1>
           <p className="mt-3 text-base text-slate-400">
             Before you can start deploying, you need to connect your AWS account.
           </p>

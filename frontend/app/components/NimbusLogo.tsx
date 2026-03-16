@@ -40,7 +40,7 @@ export function NimbusWordmark({ size = 32, className = "" }: { size?: number; c
         className="font-semibold text-white"
         style={{ fontSize: size * 0.56 }}
       >
-        Nimbus
+        Nimbus AI
       </span>
     </div>
   );
