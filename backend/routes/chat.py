@@ -1,22 +1,23 @@
 import uuid
+import os
 from typing import Optional
 
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from agents.architect import run_architect
-from agents.executor import execute_plan
+from agents.executor import run_executor
 from agents.file_generator import generate_files
 from routes.workspace import _get_or_create_workspace
-import os
 
 router = APIRouter()
 
 _sessions: dict = {}
+_MAX_SESSIONS = 500
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., max_length=4000)
     session_id: Optional[str] = None
     confirm: Optional[bool] = None
     free_tier_mode: Optional[bool] = True
@@ -32,18 +33,39 @@ class ChatResponse(BaseModel):
     generated_files: Optional[dict] = None
 
 
+DESTRUCTIVE_ACTIONS = {"stop_ec2", "terminate_ec2", "delete_s3", "delete_dynamodb", "delete_lambda"}
+
+
+def _plan_is_destructive(plan: dict) -> bool:
+    for step in plan.get("plan", []):
+        action = step.get("action", "")
+        if any(d in action for d in ("stop", "terminate", "delete")):
+            return True
+    return False
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
 
     if session_id not in _sessions:
-        _sessions[session_id] = {"history": [], "pending_plan": None}
+        # Evict oldest session if at capacity
+        if len(_sessions) >= _MAX_SESSIONS:
+            oldest = next(iter(_sessions))
+            del _sessions[oldest]
+        _sessions[session_id] = {
+            "history": [],
+            "pending_plan": None,
+            "plan_is_destructive": False,
+        }
 
     session = _sessions[session_id]
 
+    # --- Handle confirmation of a pending plan ---
     if req.confirm is not None and session["pending_plan"]:
         if not req.confirm:
             session["pending_plan"] = None
+            session["plan_is_destructive"] = False
             return ChatResponse(
                 session_id=session_id,
                 role="assistant",
@@ -51,13 +73,20 @@ async def chat(req: ChatRequest):
             )
 
         plan = session.pop("pending_plan")
-        results = execute_plan(plan, free_tier_mode=req.free_tier_mode)
+        is_destructive = session.pop("plan_is_destructive", False)
 
+        # Run the executor AI agent
+        exec_result = run_executor(
+            plan,
+            free_tier_mode=req.free_tier_mode,
+            allow_destructive=is_destructive,
+        )
+
+        results = exec_result["results"]
         ok = [r for r in results if r.get("success")]
         fail = [r for r in results if not r.get("success")]
 
         files = generate_files(plan, results)
-        session["generated_files"] = files
 
         if files:
             ws = _get_or_create_workspace()
@@ -65,22 +94,12 @@ async def chat(req: ChatRequest):
                 with open(os.path.join(ws, filename), "w") as f:
                     f.write(content)
 
-        lines = []
-        for r in results:
-            if r.get("success"):
-                lines.append(f"✅ {r.get('message', r.get('description', ''))}")
-            else:
-                lines.append(f"❌ {r.get('description', '')}: {r.get('error', 'unknown error')}")
+        # Use the executor AI's summary as the primary content
+        content = exec_result["text"]
 
-        content = (
-            f"Deployment complete!\n\n"
-            + "\n".join(lines)
-            + f"\n\n{len(ok)} succeeded, {len(fail)} failed."
-        )
+        # Append file info if generated
         if files:
             content += f"\n\n{len(files)} config file(s) generated. Use the download button to grab them."
-        if fail:
-            content += "\n\nCheck the dashboard for details."
 
         return ChatResponse(
             session_id=session_id,
@@ -90,43 +109,62 @@ async def chat(req: ChatRequest):
             generated_files=files,
         )
 
-    result = run_architect(req.message, session["history"], free_tier_mode=req.free_tier_mode)
+    # --- Normal message: send to architect agent ---
+    result = run_architect(
+        req.message,
+        session["history"],
+        free_tier_mode=req.free_tier_mode,
+    )
 
     if not result["success"]:
         return ChatResponse(
             session_id=session_id,
             role="assistant",
-            content=f"Sorry, I couldn't plan that: {result['error']}. Please try rephrasing.",
+            content=f"Sorry, I had trouble with that: {result.get('text', 'Unknown error')}. Please try again.",
         )
 
-    plan = result["plan"]
-    session["pending_plan"] = plan
+    # Update conversation history
+    session["history"] = result["messages"]
 
-    session["history"].append({"role": "user", "content": [{"text": req.message}]})
-    session["history"].append({"role": "assistant", "content": [{"text": result["raw"]}]})
+    # If the architect produced a plan, ask for confirmation
+    if result["plan"]:
+        plan = result["plan"]
+        session["pending_plan"] = plan
+        session["plan_is_destructive"] = _plan_is_destructive(plan)
 
-    steps_text = "\n".join(
-        f"  {i + 1}. {s.get('description', s.get('action', ''))}"
-        for i, s in enumerate(plan.get("plan", []))
-    )
-    cost_note = plan.get("cost_warning", "")
-    estimated = plan.get("estimated_monthly_cost", "$0.00 (free tier)")
+        content = result["text"]
 
-    content = (
-        f"{plan.get('explanation', 'Here is what I will build:')}\n\n"
-        f"**Plan:**\n{steps_text}\n\n"
-        f"**Estimated monthly cost:** {estimated}"
-    )
-    if cost_note:
-        content += f"\n\n⚠️  {cost_note}"
-    content += "\n\nShall I go ahead? Reply **yes** to deploy or **no** to cancel."
+        # Add plan details
+        steps_text = "\n".join(
+            f"  {i + 1}. {s.get('description', s.get('action', ''))}"
+            for i, s in enumerate(plan.get("plan", []))
+        )
+        estimated = plan.get("estimated_monthly_cost", "$0.00 (free tier)")
+        cost_note = plan.get("cost_warning", "")
 
+        content += f"\n\n**Plan:**\n{steps_text}"
+        content += f"\n\n**Estimated monthly cost:** {estimated}"
+        if cost_note:
+            content += f"\n\n⚠️  {cost_note}"
+
+        if session["plan_is_destructive"]:
+            content += "\n\n🚨 **This plan includes destructive actions that cannot be undone.**"
+
+        content += "\n\nShall I go ahead? Reply **yes** to deploy or **no** to cancel."
+
+        return ChatResponse(
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            awaiting_confirmation=True,
+            plan=plan,
+        )
+
+    # No plan — conversational response (the architect answered directly)
     return ChatResponse(
         session_id=session_id,
         role="assistant",
-        content=content,
-        awaiting_confirmation=True,
-        plan=plan,
+        content=result["text"],
     )
 
 

@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import Navbar from "../components/Navbar";
 import AWSGate from "../components/AWSGate";
+import { useAuthFetch } from "../lib/useAuthFetch";
 
-const API = "http://localhost:8000/api";
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,19 @@ interface Resource {
   last_modified?: string;
   size_bytes?: number;
   error?: string;
+}
+
+interface CostItem {
+  item: string;
+  monthly: number;
+  note: string;
+}
+
+interface CostDetails {
+  resource_id: string;
+  resource_type: string;
+  costs: CostItem[];
+  total_monthly: number;
 }
 
 interface BodyguardStatus {
@@ -117,7 +131,7 @@ function StatCard({ label, value, icon, color }: { label: string; value: string 
   );
 }
 
-function ResourceCard({ resource }: { resource: Resource }) {
+function ResourceCard({ resource, isSelected, onSelect }: { resource: Resource; isSelected: boolean; onSelect: () => void }) {
   if (resource.error) {
     return (
       <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
@@ -127,7 +141,12 @@ function ResourceCard({ resource }: { resource: Resource }) {
   }
 
   return (
-    <div className="glass group rounded-xl p-5 transition-all duration-200 hover:border-sky-500/30 glow-blue-hover">
+    <div
+      onClick={onSelect}
+      className={`glass group rounded-xl p-5 transition-all duration-200 cursor-pointer ${
+        isSelected ? "border-sky-500/50 ring-1 ring-sky-500/30" : "hover:border-sky-500/30 glow-blue-hover"
+      }`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-800 text-slate-400">
@@ -182,10 +201,55 @@ function ResourceCard({ resource }: { resource: Resource }) {
         )}
       </div>
 
-      <div className="mt-3 border-t border-slate-800 pt-3">
+      <div className="mt-3 border-t border-slate-800 pt-3 flex items-center justify-between">
         <p className="truncate text-xs text-slate-600 font-mono">{resource.id}</p>
+        <span className="text-[10px] text-slate-600">{isSelected ? "Click to close" : "Click for cost details"}</span>
       </div>
     </div>
+  );
+}
+
+function CostDetailsPanel({ details, onClose }: { details: CostDetails; onClose: () => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      className="glass rounded-xl p-5 border border-sky-500/20"
+    >
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <svg className="h-4 w-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          <p className="text-sm font-semibold text-white">Cost Breakdown</p>
+        </div>
+        <button onClick={onClose} className="text-slate-500 hover:text-white text-xs">Close</button>
+      </div>
+
+      <div className="space-y-2">
+        {details.costs.map((cost, i) => (
+          <div key={i} className="flex items-start justify-between gap-3 py-2 border-b border-slate-800/50 last:border-0">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-slate-300 truncate">{cost.item}</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">{cost.note}</p>
+            </div>
+            <span className={`text-xs font-mono font-semibold shrink-0 ${
+              cost.monthly > 0 ? "text-amber-400" : "text-emerald-400"
+            }`}>
+              ${cost.monthly.toFixed(2)}/mo
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-slate-700 flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-400">Total estimated</span>
+        <span className={`text-sm font-bold ${
+          details.total_monthly > 0 ? "text-amber-400" : "text-emerald-400"
+        }`}>
+          ${details.total_monthly.toFixed(2)}/mo
+        </span>
+      </div>
+    </motion.div>
   );
 }
 
@@ -360,14 +424,14 @@ function UsageWidget({ ec2Count, s3Count, dynamoCount, lambdaCount, runningEc2 }
       <div className="mt-4 rounded-lg bg-slate-800/50 border border-slate-700/50 p-3 text-center">
         <p className="text-xs text-slate-400 font-medium">Estimated monthly cost</p>
         <p className="text-xl font-bold text-white mt-0.5">
-          {runningEc2 > 0 ? `~$${(runningEc2 * 8.50).toFixed(2)}` : "$0.00"}
+          {runningEc2 > 0 ? `~$${(runningEc2 * 3.65).toFixed(2)}` : "$0.00"}
         </p>
         <p className="text-[10px] text-slate-500 mt-0.5">
           {runningEc2 === 0 && totalResources === 0
             ? "No active resources"
-            : runningEc2 <= 1
-            ? "May be covered by free tier"
-            : `${runningEc2} running instances`}
+            : runningEc2 > 0
+            ? `Public IPv4: $3.65/mo per instance. Click a resource for full breakdown.`
+            : "Click a resource for cost details"}
         </p>
       </div>
     </div>
@@ -377,14 +441,18 @@ function UsageWidget({ ec2Count, s3Count, dynamoCount, lambdaCount, runningEc2 }
 // ── Page ──────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  const authFetch = useAuthFetch();
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedResource, setSelectedResource] = useState<string | null>(null);
+  const [costDetails, setCostDetails] = useState<CostDetails | null>(null);
+  const [costLoading, setCostLoading] = useState(false);
 
   useEffect(() => {
     const fetchDash = async () => {
       try {
-        const res = await fetch(`${API}/dashboard`);
+        const res = await authFetch(`${API}/dashboard`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         setDashboard(await res.json());
         setError(null);
@@ -398,7 +466,25 @@ export default function DashboardPage() {
     fetchDash();
     const id = setInterval(fetchDash, 10_000);
     return () => clearInterval(id);
-  }, []);
+  }, [authFetch]);
+
+  const handleSelectResource = async (resource: Resource) => {
+    if (selectedResource === resource.id) {
+      setSelectedResource(null);
+      setCostDetails(null);
+      return;
+    }
+    setSelectedResource(resource.id);
+    setCostLoading(true);
+    try {
+      const res = await authFetch(`${API}/dashboard/cost-details/${resource.resource_type}/${resource.id}`);
+      if (res.ok) setCostDetails(await res.json());
+    } catch {
+      setCostDetails(null);
+    } finally {
+      setCostLoading(false);
+    }
+  };
 
   const allResources = dashboard
     ? [...dashboard.ec2, ...dashboard.s3, ...dashboard.dynamodb, ...dashboard.lambda]
@@ -527,9 +613,18 @@ export default function DashboardPage() {
                         </h2>
                         <div className="grid gap-4 sm:grid-cols-2">
                           {dashboard.ec2.map((r) => (
-                            <ResourceCard key={r.id} resource={r} />
+                            <ResourceCard key={r.id} resource={r} isSelected={selectedResource === r.id} onSelect={() => handleSelectResource(r)} />
                           ))}
                         </div>
+                        {selectedResource && dashboard.ec2.some(r => r.id === selectedResource) && (
+                          <div className="mt-4">
+                            {costLoading ? (
+                              <div className="glass rounded-xl p-5 text-center text-sm text-slate-500">Loading cost details...</div>
+                            ) : costDetails ? (
+                              <CostDetailsPanel details={costDetails} onClose={() => { setSelectedResource(null); setCostDetails(null); }} />
+                            ) : null}
+                          </div>
+                        )}
                       </motion.section>
                     )}
 
@@ -540,9 +635,18 @@ export default function DashboardPage() {
                         </h2>
                         <div className="grid gap-4 sm:grid-cols-2">
                           {dashboard.s3.map((r) => (
-                            <ResourceCard key={r.id} resource={r} />
+                            <ResourceCard key={r.id} resource={r} isSelected={selectedResource === r.id} onSelect={() => handleSelectResource(r)} />
                           ))}
                         </div>
+                        {selectedResource && dashboard.s3.some(r => r.id === selectedResource) && (
+                          <div className="mt-4">
+                            {costLoading ? (
+                              <div className="glass rounded-xl p-5 text-center text-sm text-slate-500">Loading cost details...</div>
+                            ) : costDetails ? (
+                              <CostDetailsPanel details={costDetails} onClose={() => { setSelectedResource(null); setCostDetails(null); }} />
+                            ) : null}
+                          </div>
+                        )}
                       </motion.section>
                     )}
 
@@ -553,9 +657,18 @@ export default function DashboardPage() {
                         </h2>
                         <div className="grid gap-4 sm:grid-cols-2">
                           {dashboard.dynamodb.map((r) => (
-                            <ResourceCard key={r.id} resource={r} />
+                            <ResourceCard key={r.id} resource={r} isSelected={selectedResource === r.id} onSelect={() => handleSelectResource(r)} />
                           ))}
                         </div>
+                        {selectedResource && dashboard.dynamodb.some(r => r.id === selectedResource) && (
+                          <div className="mt-4">
+                            {costLoading ? (
+                              <div className="glass rounded-xl p-5 text-center text-sm text-slate-500">Loading cost details...</div>
+                            ) : costDetails ? (
+                              <CostDetailsPanel details={costDetails} onClose={() => { setSelectedResource(null); setCostDetails(null); }} />
+                            ) : null}
+                          </div>
+                        )}
                       </motion.section>
                     )}
 
@@ -566,9 +679,18 @@ export default function DashboardPage() {
                         </h2>
                         <div className="grid gap-4 sm:grid-cols-2">
                           {dashboard.lambda.map((r) => (
-                            <ResourceCard key={r.id} resource={r} />
+                            <ResourceCard key={r.id} resource={r} isSelected={selectedResource === r.id} onSelect={() => handleSelectResource(r)} />
                           ))}
                         </div>
+                        {selectedResource && dashboard.lambda.some(r => r.id === selectedResource) && (
+                          <div className="mt-4">
+                            {costLoading ? (
+                              <div className="glass rounded-xl p-5 text-center text-sm text-slate-500">Loading cost details...</div>
+                            ) : costDetails ? (
+                              <CostDetailsPanel details={costDetails} onClose={() => { setSelectedResource(null); setCostDetails(null); }} />
+                            ) : null}
+                          </div>
+                        )}
                       </motion.section>
                     )}
                   </div>

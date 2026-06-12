@@ -20,7 +20,7 @@ _workspace: dict = {
 ALLOWED_COMMANDS = {
     "git", "ls", "cat", "pwd", "tree", "mkdir", "touch",
     "rm", "mv", "cp", "echo", "head", "tail", "wc",
-    "grep", "find", "chmod", "diff",
+    "grep", "find", "chmod", "diff", 
 }
 
 BLOCKED_GIT = {"push --force", "reset --hard", "clean -fd"}
@@ -210,10 +210,12 @@ async def write_files(req: WriteFilesRequest):
     written = []
 
     for filename, content in req.files.items():
-        filepath = os.path.join(ws, filename)
+        # Normalize and enforce workspace boundary (prevent path traversal)
+        filepath = os.path.normpath(os.path.join(ws, filename))
+        if not filepath.startswith(ws + os.sep) and filepath != ws:
+            continue
         dirpath = os.path.dirname(filepath)
-        if dirpath != ws:
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(dirpath, exist_ok=True)
         with open(filepath, "w") as f:
             f.write(content)
         written.append(filename)
@@ -244,8 +246,10 @@ async def read_file(filename: str):
     if not ws:
         return {"success": False, "content": ""}
 
-    filepath = os.path.join(ws, filename)
-    if not os.path.exists(filepath) or not filepath.startswith(ws):
+    filepath = os.path.normpath(os.path.join(ws, filename))
+    if not filepath.startswith(ws + os.sep) and filepath != ws:
+        return {"success": False, "content": "File not found"}
+    if not os.path.exists(filepath):
         return {"success": False, "content": "File not found"}
 
     try:
@@ -259,9 +263,9 @@ async def read_file(filename: str):
 @router.post("/workspace/file/save")
 async def save_file(req: SaveFileRequest):
     ws = _get_or_create_workspace()
-    filepath = os.path.join(ws, req.filename)
+    filepath = os.path.normpath(os.path.join(ws, req.filename))
 
-    if not filepath.startswith(ws):
+    if not filepath.startswith(ws + os.sep) and filepath != ws:
         return {"success": False, "message": "Invalid path"}
 
     dirpath = os.path.dirname(filepath)

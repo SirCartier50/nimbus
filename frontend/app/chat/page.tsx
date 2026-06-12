@@ -4,8 +4,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Navbar from "../components/Navbar";
 import AWSGate from "../components/AWSGate";
+import { useAuthFetch } from "../lib/useAuthFetch";
 
-const API = "http://localhost:8000/api";
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ function EditorPanel({ onFileChange }: { onFileChange?: () => void }) {
 
   const loadFiles = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/workspace/files`);
+      const res = await authFetch(`${API}/workspace/files`);
       const data = await res.json();
       setFiles(data.files || []);
     } catch {
@@ -185,7 +186,7 @@ function EditorPanel({ onFileChange }: { onFileChange?: () => void }) {
       await saveFile();
     }
     try {
-      const res = await fetch(`${API}/workspace/file/${encodeURIComponent(name)}`);
+      const res = await authFetch(`${API}/workspace/file/${encodeURIComponent(name)}`);
       const data = await res.json();
       if (data.success) {
         setActiveFile(name);
@@ -201,7 +202,7 @@ function EditorPanel({ onFileChange }: { onFileChange?: () => void }) {
     if (!activeFile) return;
     setSaving(true);
     try {
-      await fetch(`${API}/workspace/file/save`, {
+      await authFetch(`${API}/workspace/file/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename: activeFile, content }),
@@ -349,7 +350,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
     addLine("system", "Nimbus AI Terminal v1.0", "info");
     addLine("system", "Type 'help' for commands", "info");
 
-    fetch(`${API}/workspace/github/status`)
+    authFetch(`${API}/workspace/github/status`)
       .then((r) => r.json())
       .then((data) => {
         if (data.linked) {
@@ -363,7 +364,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/dashboard/bodyguard`);
+        const res = await authFetch(`${API}/dashboard/bodyguard`);
         if (!res.ok) return;
         const data: BodyguardStatus = await res.json();
         data.recent_logs.forEach((log) => {
@@ -386,7 +387,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
 
   const execBackend = async (command: string) => {
     try {
-      const res = await fetch(`${API}/workspace/exec`, {
+      const res = await authFetch(`${API}/workspace/exec`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command }),
@@ -407,7 +408,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
   const linkGitHub = async (url: string) => {
     addLine("git", `Linking: ${url}`, "info");
     try {
-      const res = await fetch(`${API}/workspace/github/link`, {
+      const res = await authFetch(`${API}/workspace/github/link`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo_url: url }),
@@ -463,7 +464,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
     }
     if (command === "files") {
       try {
-        const res = await fetch(`${API}/workspace/files`);
+        const res = await authFetch(`${API}/workspace/files`);
         const data = await res.json();
         if (!data.files.length) {
           addLine("system", "No files yet. Deploy from chat to generate.", "info");
@@ -483,7 +484,7 @@ function TerminalPanel({ activity }: { activity: ActivityEntry[] }) {
         addLine("system", "Enter repo URL above", "info");
       } else if (parts[1] === "status") {
         try {
-          const res = await fetch(`${API}/workspace/github/status`);
+          const res = await authFetch(`${API}/workspace/github/status`);
           const data = await res.json();
           addLine("git", data.linked ? `${data.repo_url} (${data.branch})` : "Not linked", "output");
         } catch { addLine("system", "Could not reach backend", "error"); }
@@ -834,6 +835,7 @@ function MessageBubble({
 // ── Page ──────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
+  const authFetch = useAuthFetch();
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
@@ -888,7 +890,7 @@ export default function ChatPage() {
       const body: Record<string, unknown> = { message: text, session_id: sessionId, free_tier_mode: freeTierMode };
       if (confirm !== undefined) body.confirm = confirm;
 
-      const res = await fetch(`${API}/chat`, {
+      const res = await authFetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

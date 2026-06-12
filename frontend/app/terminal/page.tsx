@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Navbar from "../components/Navbar";
 import AWSGate from "../components/AWSGate";
+import { useAuthFetch } from "../lib/useAuthFetch";
 
-const API = "http://localhost:8000/api";
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
 
 interface LogEntry {
   timestamp: string;
@@ -67,6 +68,7 @@ function levelPrefix(level: string) {
 }
 
 export default function TerminalPage() {
+  const authFetch = useAuthFetch();
   const [lines, setLines] = useState<TerminalLine[]>([]);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -104,7 +106,7 @@ export default function TerminalPage() {
 
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/dashboard/bodyguard`);
+        const res = await authFetch(`${API}/dashboard/bodyguard`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: BodyguardStatus = await res.json();
 

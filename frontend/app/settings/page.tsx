@@ -4,8 +4,9 @@ import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { useUser } from "@clerk/nextjs";
 import Navbar from "../components/Navbar";
+import { useAuthFetch } from "../lib/useAuthFetch";
 
-const API = "http://localhost:8000/api";
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
 
 interface AWSConfig {
   access_key_id: string;
@@ -21,6 +22,7 @@ interface GitHubConfig {
 
 export default function SettingsPage() {
   const { user } = useUser();
+  const authFetch = useAuthFetch();
 
   const [awsConfig, setAwsConfig] = useState<AWSConfig>({
     access_key_id: "",
@@ -58,7 +60,7 @@ export default function SettingsPage() {
   useEffect(() => {
     const checkConnection = async () => {
       try {
-        const res = await fetch(`${API}/settings/aws`);
+        const res = await authFetch(`${API}/settings/aws`);
         if (res.ok) {
           const data = await res.json();
           setAwsConfig((prev) => ({ ...prev, connected: data.connected, region: data.region || "us-east-1" }));
@@ -68,7 +70,7 @@ export default function SettingsPage() {
       }
 
       try {
-        const res = await fetch(`${API}/settings/github`);
+        const res = await authFetch(`${API}/settings/github`);
         if (res.ok) {
           const data = await res.json();
           setGithubConfig((prev) => ({ ...prev, connected: data.connected, repo_url: data.repo_url || "" }));
@@ -86,7 +88,7 @@ export default function SettingsPage() {
     setAwsError("");
 
     try {
-      const res = await fetch(`${API}/settings/aws`, {
+      const res = await authFetch(`${API}/settings/aws`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -116,7 +118,7 @@ export default function SettingsPage() {
     setGithubStatus("idle");
 
     try {
-      const res = await fetch(`${API}/settings/github`, {
+      const res = await authFetch(`${API}/settings/github`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo_url: githubConfig.repo_url }),

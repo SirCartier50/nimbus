@@ -4,20 +4,22 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { NimbusIcon } from "./NimbusLogo";
+import { useAuthFetch } from "../lib/useAuthFetch";
 
-const API = "http://localhost:8000/api";
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
 
 interface AWSGateProps {
   children: React.ReactNode;
 }
 
 export default function AWSGate({ children }: AWSGateProps) {
+  const authFetch = useAuthFetch();
   const [status, setStatus] = useState<"loading" | "connected" | "disconnected" | "error">("loading");
 
   useEffect(() => {
     const check = async () => {
       try {
-        const res = await fetch(`${API}/settings/aws`);
+        const res = await authFetch(`${API}/settings/aws`);
         if (!res.ok) throw new Error();
         const data = await res.json();
         setStatus(data.connected ? "connected" : "disconnected");
