@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Grants Nimbus AI temporary, revocable access to this AWS account via
+  STS AssumeRole. No long-lived credentials of yours are ever stored by
+  Nimbus — the ExternalId below (shown to you in Nimbus Settings) is the
+  only thing that has to match, and you can delete this stack at any time
+  to instantly revoke access.
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: >
+      The unique External ID shown to you in Nimbus Settings when you
+      started this connection. Required — without it, the role's trust
+      policy will not match and AssumeRole will be denied.
+    MinLength: 1
+    NoEcho: false
+
+  NimbusPrincipalArn:
+    Type: String
+    Description: >
+      The IAM identity Nimbus's backend uses to call AssumeRole. Leave the
+      default unless Nimbus has told you to use a different value.
+    Default: "arn:aws:iam::804306814230:user/botouser"
+
+  PolicyArn:
+    Type: String
+    Description: >
+      The managed policy attached to the role Nimbus assumes. Defaults to
+      PowerUserAccess (full resource management, excluding IAM/account
+      administration) to match what Nimbus's onboarding asks for. Narrow
+      this if you want to scope Nimbus down further.
+    Default: "arn:aws:iam::aws:policy/PowerUserAccess"
+
+Resources:
+  NimbusAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: NimbusAccessRole
+      Description: Assumed by Nimbus AI to manage resources in this account on your behalf.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref NimbusPrincipalArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      ManagedPolicyArns:
+        - !Ref PolicyArn
+      Tags:
+        - Key: ManagedBy
+          Value: Nimbus
+
+Outputs:
+  RoleArn:
+    Description: >
+      Paste this value back into Nimbus Settings to finish connecting your
+      AWS account.
+    Value: !GetAtt NimbusAccessRole.Arn

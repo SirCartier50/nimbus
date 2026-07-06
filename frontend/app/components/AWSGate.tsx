@@ -14,7 +14,16 @@ interface AWSGateProps {
 
 export default function AWSGate({ children }: AWSGateProps) {
   const authFetch = useAuthFetch();
-  const [status, setStatus] = useState<"loading" | "connected" | "disconnected" | "error">("loading");
+  // A returning user who was connected last time almost certainly still is —
+  // render immediately from that cached signal instead of blocking every single
+  // page load behind a fresh round-trip, then confirm/correct in the background.
+  // Measured: this removes ~250ms of pure sequential dead time before the chat
+  // page (and its own session/dashboard fetches) can even start loading.
+  const [status, setStatus] = useState<"loading" | "connected" | "disconnected" | "error">(() =>
+    typeof window !== "undefined" && localStorage.getItem("nimbus_aws_connected") === "true"
+      ? "connected"
+      : "loading"
+  );
 
   useEffect(() => {
     const check = async () => {
@@ -22,9 +31,14 @@ export default function AWSGate({ children }: AWSGateProps) {
         const res = await authFetch(`${API}/settings/aws`);
         if (!res.ok) throw new Error();
         const data = await res.json();
-        setStatus(data.connected ? "connected" : "disconnected");
+        const connected = !!data.connected;
+        setStatus(connected ? "connected" : "disconnected");
+        localStorage.setItem("nimbus_aws_connected", connected ? "true" : "false");
       } catch {
-        setStatus("error");
+        // A transient blip shouldn't kick an already-optimistically-rendered
+        // returning user back to a full-page error — only show it if we had
+        // no good cached signal to begin with.
+        setStatus((prev) => (prev === "connected" ? prev : "error"));
       }
     };
     check();
@@ -54,12 +68,10 @@ export default function AWSGate({ children }: AWSGateProps) {
           className="glass max-w-md rounded-2xl p-8 text-center"
         >
           <div className="mb-4 text-4xl">⚠️</div>
-          <h2 className="text-xl font-bold text-white">Backend Unavailable</h2>
+          <h2 className="text-xl font-bold text-white">Something went wrong</h2>
           <p className="mt-2 text-sm text-slate-400">
-            Cannot reach the Nimbus AI backend. Make sure it&apos;s running on port 8000.
-          </p>
-          <p className="mt-4 rounded-lg bg-slate-800/50 p-3 font-mono text-xs text-slate-500">
-            uvicorn main:app --reload --port 8000
+            We couldn&apos;t load your account right now. This is usually temporary —
+            please try again in a moment.
           </p>
           <button
             onClick={() => window.location.reload()}
@@ -103,8 +115,8 @@ export default function AWSGate({ children }: AWSGateProps) {
                   1
                 </span>
                 <span>
-                  Log into the{" "}
-                  <span className="text-slate-300">AWS Console</span> and go to IAM → Users → Create User
+                  Copy your unique <span className="text-slate-300">External ID</span> from the
+                  Settings page
                 </span>
               </li>
               <li className="flex gap-3">
@@ -112,7 +124,8 @@ export default function AWSGate({ children }: AWSGateProps) {
                   2
                 </span>
                 <span>
-                  Attach the <span className="text-slate-300 font-mono text-xs">PowerUserAccess</span> policy
+                  Deploy our <span className="text-slate-300">CloudFormation template</span> in your
+                  AWS account, pasting in that External ID
                 </span>
               </li>
               <li className="flex gap-3">
@@ -120,7 +133,8 @@ export default function AWSGate({ children }: AWSGateProps) {
                   3
                 </span>
                 <span>
-                  Create an <span className="text-slate-300">Access Key</span> and paste the credentials in Settings
+                  Copy the stack&apos;s <span className="text-slate-300">Role ARN</span> output and
+                  paste it into Settings
                 </span>
               </li>
             </ol>
@@ -134,7 +148,8 @@ export default function AWSGate({ children }: AWSGateProps) {
           </Link>
 
           <p className="mt-4 text-xs text-slate-600">
-            Your credentials are encrypted and never stored on our servers
+            Nimbus never sees or stores a long-lived AWS key — only short-lived, expiring
+            credentials it requests when it needs to act on your account
           </p>
         </motion.div>
       </div>

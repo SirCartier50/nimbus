@@ -1,0 +1,128 @@
+================================================================
+NIMBUS — DEV-3 DATABASE SCHEMA (DRAFT)
+================================================================
+Status: Models written, initial Alembic migration generated and applied to Supabase.
+Step 7 (route wiring) is done: chat.py sessions/deployments and settings.py
+user_settings (Fernet-encrypted AWS creds) are backed by Postgres.
+DB: PostgreSQL via Supabase. SQLAlchemy 2.0 (async, asyncpg) + Alembic.
+
+----------------------------------------------------------------
+TABLE: users
+----------------------------------------------------------------
+id              UUID, PK
+clerk_user_id   text, unique, not null   -- Clerk "sub" claim, lookup key
+email           text, nullable           -- from Clerk, for display
+created_at      timestamptz
+
+----------------------------------------------------------------
+TABLE: user_settings
+----------------------------------------------------------------
+One-to-one with users. Website config + credential management ONLY.
+(NOT free_tier_mode, NOT region — those are per-session/per-request.)
+
+user_id                 UUID, PK, FK -> users.id
+aws_access_key_id       text, encrypted (Fernet)
+aws_secret_access_key   text, encrypted (Fernet)
+github_repo_url         text, nullable
+updated_at              timestamptz
+
+----------------------------------------------------------------
+TABLE: sessions
+----------------------------------------------------------------
+Replaces in-memory _sessions dict in routes/chat.py.
+Per-session choices live here (model, region) to support
+multi-model selection without round-tripping to settings.
+
+id                   UUID, PK            -- == current session_id
+user_id              UUID, FK -> users.id
+title                text, nullable      -- for session list/sidebar
+model                text                -- Bedrock model id for this session
+region               text, default 'us-east-1'
+history              JSONB               -- message history
+pending_plan         JSONB, nullable
+plan_is_destructive  bool, default false
+generated_files      JSONB, nullable
+created_at           timestamptz
+updated_at           timestamptz
+
+----------------------------------------------------------------
+TABLE: deployments
+----------------------------------------------------------------
+id           UUID, PK
+user_id      UUID, FK -> users.id
+session_id   UUID, FK -> sessions.id, nullable
+plan         JSONB    -- the plan that was executed
+results      JSONB    -- executor output
+status       text     -- success / partial / failed
+created_at   timestamptz
+
+----------------------------------------------------------------
+EXPLICITLY OUT OF SCOPE FOR THIS SCHEMA
+----------------------------------------------------------------
+- Dashboard / deployed-resource state (EC2, S3, DynamoDB, Lambda, etc.)
+  -> Pulled live from boto3 on each dashboard load. Not "instant"
+     (~100-500ms with tag lookups) but live AWS state should not go
+     stale in Postgres. If latency/API throttling becomes an issue,
+     add a short-TTL Redis cache later (PROD-3) — not a DB table.
+
+- free_tier_mode
+  -> Already a per-request field on ChatRequest (chat.py). Already
+     behaves as a chat-page toggle. No schema change needed.
+
+- Bodyguard alerts/logs
+  -> Decided earlier: not persisted.
+
+----------------------------------------------------------------
+OPEN DECISION
+----------------------------------------------------------------
+PK strategy: UUID PKs everywhere (recommended) vs reusing
+clerk_user_id / existing session_id strings directly as PKs.
+
+================================================================
+NEXT STEPS (in order)
+================================================================
+1. Decide PK strategy (see Open Decision above).
+
+2. Set up backend/db/engine.py
+   - create_async_engine() with asyncpg driver
+   - async_sessionmaker for DB sessions
+   - Read DATABASE_URL from env (Supabase connection string)
+
+3. Write backend/db/models.py
+   - SQLAlchemy 2.0 DeclarativeBase
+   - Models: User, UserSettings, Session, Deployment
+   - Define relationships (User -> UserSettings, User -> Sessions,
+     User -> Deployments, Session -> Deployments)
+
+4. Initialize Alembic
+   - `alembic init` inside backend/
+   - Configure env.py for async engine
+   - Point Alembic at models' metadata for autogenerate
+
+5. Generate first migration
+   - `alembic revision --autogenerate -m "initial schema"`
+   - Review the generated SQL manually before applying
+
+6. Apply migration to Supabase Postgres instance, verify tables exist
+
+7. (Separate follow-up phase) Wire routes/chat.py's _sessions dict
+   to read/write the sessions table; wire routes/settings.py to
+   user_settings; encrypt AWS creds with Fernet (SEC-3).
+
+================================================================
+SUGGESTIONS / THINGS TO KEEP IN MIND
+================================================================
+- user_settings should stay minimal — resist scope creep into
+  storing things that are really session-level or derived/live data.
+- Encrypt AWS credentials with Fernet (reversible) — NOT a one-way
+  hash, since boto3 needs the plaintext keys to make API calls.
+- Consider an index on sessions.user_id and sessions.updated_at
+  for an efficient "recent sessions" sidebar query.
+- JSONB columns (history, pending_plan, generated_files, plan,
+  results) give flexibility now; if specific fields inside them
+  become commonly queried later, they can be promoted to real
+  columns in a later migration.
+- Region per-session (not per-account) means a user could deploy
+  to different regions in different chats — confirm this matches
+  how you want region selection to feel in the UI (e.g. a dropdown
+  near the model selector on the chat page).

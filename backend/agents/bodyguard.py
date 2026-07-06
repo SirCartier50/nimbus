@@ -3,8 +3,11 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
+from db.crud import list_users_with_aws_credentials
+from db.engine import async_session_local
 from utils.aws_clients import get_cloudwatch_client, get_ec2_client, get_sts_client
 from utils.tool_use import run_tool_loop
+from utils.user_aws import get_user_boto3_session
 
 logger = logging.getLogger("bodyguard")
 
@@ -13,53 +16,72 @@ IPV4_COST_PER_HOUR = 0.005
 EBS_GP2_COST_PER_GB_MONTH = 0.10
 EBS_GP3_COST_PER_GB_MONTH = 0.08
 
-state = {
-    "running": False,
-    "last_check": None,
-    "instances_stopped": 0,
-    "logs": [],
-    "alerts": [],
-    "sub_resources": {
-        "volumes": [],
-        "elastic_ips": [],
-        "snapshots": [],
-    },
-}
+# Bodyguard patrols every user's AWS account independently, each with its own
+# decrypted boto3 session and its own isolated state slot — alerts/logs for one
+# user must never leak into another user's dashboard. `state` is keyed by
+# str(user_id); `_daemon_active` is the one piece of truly global, non-user
+# data (whether the background loop itself is running at all).
+state: dict[str, dict] = {}
+_daemon_active = False
+
+
+def _new_user_state() -> dict:
+    return {
+        "last_check": None,
+        "instances_stopped": 0,
+        "logs": [],
+        "alerts": [],
+        "sub_resources": {
+            "volumes": [],
+            "elastic_ips": [],
+            "snapshots": [],
+        },
+    }
+
+
+def _get_user_state(user_id: str) -> dict:
+    if user_id not in state:
+        state[user_id] = _new_user_state()
+    return state[user_id]
+
 
 # ---------------------------------------------------------------------------
-# State helpers
+# State helpers — operate on one user's state slot, never the module globally
 # ---------------------------------------------------------------------------
 
 
-def _log(msg: str, level: str = "info"):
+def _log(user_state: dict, msg: str, level: str = "info"):
     entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "level": level, "message": msg}
-    state["logs"].append(entry)
-    if len(state["logs"]) > 200:
-        state["logs"] = state["logs"][-100:]
+    user_state["logs"].append(entry)
+    if len(user_state["logs"]) > 200:
+        user_state["logs"] = user_state["logs"][-100:]
     getattr(logger, level, logger.info)(msg)
 
 
-def _alert(msg: str, severity: str = "warning"):
-    state["alerts"].append({
+def _alert(user_state: dict, msg: str, severity: str = "warning"):
+    user_state["alerts"].append({
         "id": f"alert-{int(time.time() * 1000)}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "message": msg,
         "severity": severity,
         "read": False,
     })
-    if len(state["alerts"]) > 100:
-        state["alerts"] = state["alerts"][-50:]
+    if len(user_state["alerts"]) > 100:
+        user_state["alerts"] = user_state["alerts"][-50:]
 
 
 # ---------------------------------------------------------------------------
-# Tool handlers — the bodyguard AI calls these
+# Tool handlers — the bodyguard AI calls these, scoped to one user's session
 # ---------------------------------------------------------------------------
 
 
-def _handle_list_running_instances(params: dict) -> dict:
-    ec2 = get_ec2_client()
+def _handle_list_running_instances(params: dict, session=None) -> dict:
+    ec2 = get_ec2_client(session)
     resp = ec2.describe_instances(
-        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+        Filters=[
+            {"Name": "instance-state-name", "Values": ["running"]},
+            {"Name": "tag:ManagedBy", "Values": ["Nimbus"]},
+        ]
     )
     instances = []
     for r in resp.get("Reservations", []):
@@ -68,24 +90,20 @@ def _handle_list_running_instances(params: dict) -> dict:
                 (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"),
                 inst["InstanceId"],
             )
-            managed_by = next(
-                (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "ManagedBy"),
-                None,
-            )
             instances.append({
                 "instance_id": inst["InstanceId"],
                 "name": name,
                 "instance_type": inst.get("InstanceType"),
                 "public_ip": inst.get("PublicIpAddress"),
                 "launch_time": inst["LaunchTime"].isoformat() if inst.get("LaunchTime") else None,
-                "managed_by_nimbus": managed_by == "Nimbus",
+                "managed_by_nimbus": True,
                 "is_free_tier": inst.get("InstanceType") in ("t2.micro", "t3.micro"),
             })
     return {"instances": instances, "count": len(instances)}
 
 
-def _handle_get_cpu_metrics(params: dict) -> dict:
-    cw = get_cloudwatch_client()
+def _handle_get_cpu_metrics(params: dict, session=None) -> dict:
+    cw = get_cloudwatch_client(session)
     instance_id = params["instance_id"]
     minutes = params.get("minutes", 30)
 
@@ -114,8 +132,8 @@ def _handle_get_cpu_metrics(params: dict) -> dict:
     }
 
 
-def _handle_check_ebs_volumes(params: dict) -> dict:
-    ec2 = get_ec2_client()
+def _handle_check_ebs_volumes(params: dict, session=None, user_state: dict = None) -> dict:
+    ec2 = get_ec2_client(session)
     vols = ec2.describe_volumes().get("Volumes", [])
     volumes = []
     for vol in vols:
@@ -133,7 +151,8 @@ def _handle_check_ebs_volumes(params: dict) -> dict:
             "cost_per_month": round(cost_per_month, 2),
         })
 
-    state["sub_resources"]["volumes"] = volumes
+    if user_state is not None:
+        user_state["sub_resources"]["volumes"] = volumes
     orphaned = [v for v in volumes if not v["attached_to"]]
     return {
         "volumes": volumes,
@@ -143,8 +162,8 @@ def _handle_check_ebs_volumes(params: dict) -> dict:
     }
 
 
-def _handle_check_elastic_ips(params: dict) -> dict:
-    ec2 = get_ec2_client()
+def _handle_check_elastic_ips(params: dict, session=None, user_state: dict = None) -> dict:
+    ec2 = get_ec2_client(session)
     eips = ec2.describe_addresses().get("Addresses", [])
     result = []
     for eip in eips:
@@ -155,13 +174,14 @@ def _handle_check_elastic_ips(params: dict) -> dict:
             "attached_to": associated,
             "cost_per_month": 0.0 if associated else round(IPV4_COST_PER_HOUR * 730, 2),
         })
-    state["sub_resources"]["elastic_ips"] = result
+    if user_state is not None:
+        user_state["sub_resources"]["elastic_ips"] = result
     return {"elastic_ips": result, "total": len(result)}
 
 
-def _handle_check_snapshots(params: dict) -> dict:
-    ec2 = get_ec2_client()
-    account_id = get_sts_client().get_caller_identity()["Account"]
+def _handle_check_snapshots(params: dict, session=None, user_state: dict = None) -> dict:
+    ec2 = get_ec2_client(session)
+    account_id = get_sts_client(session).get_caller_identity()["Account"]
     snaps = ec2.describe_snapshots(OwnerIds=[account_id]).get("Snapshots", [])
     result = []
     for snap in snaps:
@@ -172,34 +192,53 @@ def _handle_check_snapshots(params: dict) -> dict:
             "state": snap.get("State", "unknown"),
             "cost_per_month": round(size_gb * 0.05, 2),
         })
-    state["sub_resources"]["snapshots"] = result
+    if user_state is not None:
+        user_state["sub_resources"]["snapshots"] = result
     total_cost = sum(s["cost_per_month"] for s in result)
     return {"snapshots": result, "total": len(result), "total_monthly_cost": round(total_cost, 2)}
 
 
-def _handle_stop_instance(params: dict) -> dict:
-    ec2 = get_ec2_client()
+def _handle_stop_instance(params: dict, session=None, user_state: dict = None) -> dict:
+    ec2 = get_ec2_client(session)
     instance_id = params["instance_id"]
     reason = params.get("reason", "Stopped by Nimbus Bodyguard")
     ec2.stop_instances(InstanceIds=[instance_id])
-    state["instances_stopped"] += 1
-    _log(f"Stopped instance {instance_id}: {reason}", "warning")
+    if user_state is not None:
+        user_state["instances_stopped"] += 1
+        _log(user_state, f"Stopped instance {instance_id}: {reason}", "warning")
     return {"success": True, "instance_id": instance_id, "message": f"Instance stopped: {reason}"}
 
 
-def _handle_create_alert(params: dict) -> dict:
+def _handle_create_alert(params: dict, user_state: dict = None) -> dict:
     message = params["message"]
     severity = params.get("severity", "warning")
-    _alert(message, severity)
-    _log(f"Alert created ({severity}): {message}")
+    if user_state is not None:
+        _alert(user_state, message, severity)
+        _log(user_state, f"Alert created ({severity}): {message}")
     return {"success": True, "message": "Alert created"}
 
 
-def _handle_log_finding(params: dict) -> dict:
+def _handle_log_finding(params: dict, user_state: dict = None) -> dict:
     message = params["message"]
     level = params.get("level", "info")
-    _log(message, level)
+    if user_state is not None:
+        _log(user_state, message, level)
     return {"success": True}
+
+
+def _build_handlers(session, user_state: dict) -> dict:
+    """Bind session + user_state per patrol call via closures — never globals —
+    so concurrent patrols of different users' accounts can't bleed into each other."""
+    return {
+        "list_running_instances": lambda p: _handle_list_running_instances(p, session),
+        "get_cpu_metrics": lambda p: _handle_get_cpu_metrics(p, session),
+        "check_ebs_volumes": lambda p: _handle_check_ebs_volumes(p, session, user_state),
+        "check_elastic_ips": lambda p: _handle_check_elastic_ips(p, session, user_state),
+        "check_snapshots": lambda p: _handle_check_snapshots(p, session, user_state),
+        "stop_instance": lambda p: _handle_stop_instance(p, session, user_state),
+        "create_alert": lambda p: _handle_create_alert(p, user_state),
+        "log_finding": lambda p: _handle_log_finding(p, user_state),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -303,17 +342,6 @@ TOOL_CONFIG = {
     ]
 }
 
-TOOL_HANDLERS = {
-    "list_running_instances": _handle_list_running_instances,
-    "get_cpu_metrics": _handle_get_cpu_metrics,
-    "check_ebs_volumes": _handle_check_ebs_volumes,
-    "check_elastic_ips": _handle_check_elastic_ips,
-    "check_snapshots": _handle_check_snapshots,
-    "stop_instance": _handle_stop_instance,
-    "create_alert": _handle_create_alert,
-    "log_finding": _handle_log_finding,
-}
-
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
@@ -345,92 +373,106 @@ SAFETY RULES:
 Be efficient with your tool calls. Start by listing instances, then only check CPU for instances that are running."""
 
 # ---------------------------------------------------------------------------
-# Background loop
+# Background loop — one daemon task, patrolling every connected user's AWS
+# account each cycle with that user's own decrypted credentials
 # ---------------------------------------------------------------------------
 
 
 async def _bodyguard_loop():
-    _log("Bodyguard agent started")
-    state["running"] = True
+    logger.info("Bodyguard daemon started")
 
-    while state["running"]:
+    while _daemon_active:
         try:
-            state["last_check"] = datetime.now(timezone.utc).isoformat()
-            _log("Starting patrol...")
-
-            # Run the AI agent in a thread to avoid blocking the event loop
-            await asyncio.to_thread(_run_patrol)
-
-            _log(f"Patrol complete. Next check in {CHECK_INTERVAL}s")
+            async with async_session_local() as db:
+                users = await list_users_with_aws_credentials(db)
+                for user in users:
+                    user_id = str(user.id)
+                    user_state = _get_user_state(user_id)
+                    user_state["last_check"] = datetime.now(timezone.utc).isoformat()
+                    try:
+                        session = await get_user_boto3_session(db, user.id)
+                        if session is None:
+                            continue
+                        # Run the AI agent in a thread to avoid blocking the event loop
+                        await asyncio.to_thread(_run_patrol, session, user_state)
+                    except Exception as e:
+                        _log(user_state, f"Patrol error: {e}", "error")
         except Exception as e:
-            _log(f"Patrol error: {e}", "error")
+            logger.error(f"Bodyguard loop error enumerating users: {e}")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-def _run_patrol():
-    """Run one patrol cycle using the AI agent."""
+def _run_patrol(session, user_state: dict):
+    """Run one patrol cycle for one user's AWS account using the AI agent."""
     try:
+        handlers = _build_handlers(session, user_state)
         run_tool_loop(
             system_prompt=BODYGUARD_PROMPT,
             messages=[{"role": "user", "content": [{"text": "Run your patrol. Check all running instances and resources."}]}],
             tool_config=TOOL_CONFIG,
-            tool_handlers=TOOL_HANDLERS,
+            tool_handlers=handlers,
             max_iterations=10,
         )
     except Exception as e:
-        _log(f"AI patrol failed, running basic checks: {e}", "error")
-        _fallback_patrol()
+        _log(user_state, f"AI patrol failed, running basic checks: {e}", "error")
+        _fallback_patrol(session, user_state)
 
 
-def _fallback_patrol():
+def _fallback_patrol(session, user_state: dict):
     """Basic non-AI patrol in case Bedrock is unavailable."""
     try:
-        instances = _handle_list_running_instances({})
-        _log(f"Fallback patrol: {instances['count']} running instances")
+        instances = _handle_list_running_instances({}, session)
+        _log(user_state, f"Fallback patrol: {instances['count']} running instances")
         for inst in instances.get("instances", []):
             if not inst["is_free_tier"]:
                 _alert(
+                    user_state,
                     f"Non-free-tier instance '{inst['name']}' ({inst['instance_type']}) is running.",
                     "warning",
                 )
     except Exception as e:
-        _log(f"Fallback patrol error: {e}", "error")
+        _log(user_state, f"Fallback patrol error: {e}", "error")
 
 
 def start_bodyguard():
+    global _daemon_active
+    _daemon_active = True
     loop = asyncio.get_event_loop()
     loop.create_task(_bodyguard_loop())
 
 
 def stop_bodyguard():
-    state["running"] = False
-    _log("Bodyguard agent stopped")
+    global _daemon_active
+    _daemon_active = False
+    logger.info("Bodyguard agent stopped")
 
 
 # ---------------------------------------------------------------------------
-# Public status API (unchanged)
+# Public status API — every call is scoped to one user's state slot
 # ---------------------------------------------------------------------------
 
 
-def get_status() -> dict:
+def get_status(user_id: str) -> dict:
+    user_state = _get_user_state(user_id)
     return {
-        "running": state["running"],
-        "last_check": state["last_check"],
-        "instances_stopped_total": state["instances_stopped"],
-        "recent_logs": state["logs"][-20:],
-        "unread_alerts": [a for a in state["alerts"] if not a["read"]],
-        "all_alerts": state["alerts"][-20:],
-        "sub_resources": state["sub_resources"],
+        "running": _daemon_active,
+        "last_check": user_state["last_check"],
+        "instances_stopped_total": user_state["instances_stopped"],
+        "recent_logs": user_state["logs"][-20:],
+        "unread_alerts": [a for a in user_state["alerts"] if not a["read"]],
+        "all_alerts": user_state["alerts"][-20:],
+        "sub_resources": user_state["sub_resources"],
     }
 
 
-def get_alerts() -> list:
-    return state["alerts"]
+def get_alerts(user_id: str) -> list:
+    return _get_user_state(user_id)["alerts"]
 
 
-def mark_alert_read(alert_id: str):
-    for a in state["alerts"]:
+def mark_alert_read(user_id: str, alert_id: str):
+    user_state = _get_user_state(user_id)
+    for a in user_state["alerts"]:
         if a["id"] == alert_id:
             a["read"] = True
             break

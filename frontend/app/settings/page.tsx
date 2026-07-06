@@ -2,16 +2,16 @@
 
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { useUser } from "@clerk/nextjs";
+import Link from "next/link";
+import { useAuth, useUser } from "@clerk/nextjs";
 import Navbar from "../components/Navbar";
 import { useAuthFetch } from "../lib/useAuthFetch";
 
 const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
 
 interface AWSConfig {
-  access_key_id: string;
-  secret_access_key: string;
-  region: string;
+  role_arn: string;
+  external_id: string;
   connected: boolean;
 }
 
@@ -22,12 +22,16 @@ interface GitHubConfig {
 
 export default function SettingsPage() {
   const { user } = useUser();
+  const { has } = useAuth();
   const authFetch = useAuthFetch();
 
+  // Nimbus doesn't yet define plan slugs beyond "free" — this resolves once the
+  // paid plans are configured in the Clerk Dashboard (see PIPELINE_PLAN / HANDOFF).
+  const isPro = has?.({ plan: "pro" }) ?? false;
+
   const [awsConfig, setAwsConfig] = useState<AWSConfig>({
-    access_key_id: "",
-    secret_access_key: "",
-    region: "us-east-1",
+    role_arn: "",
+    external_id: "",
     connected: false,
   });
 
@@ -44,16 +48,10 @@ export default function SettingsPage() {
   const [githubStatus, setGithubStatus] = useState<"idle" | "success" | "error">("idle");
 
   const [freeTier, setFreeTier] = useState(true);
-  const [autoStop, setAutoStop] = useState(true);
-  const [budgetAlerts, setBudgetAlerts] = useState(true);
 
   useEffect(() => {
     const ft = localStorage.getItem("nimbus_free_tier");
-    const as_ = localStorage.getItem("nimbus_auto_stop");
-    const ba = localStorage.getItem("nimbus_budget_alerts");
     if (ft !== null) setFreeTier(JSON.parse(ft));
-    if (as_ !== null) setAutoStop(JSON.parse(as_));
-    if (ba !== null) setBudgetAlerts(JSON.parse(ba));
   }, []);
 
   // Check existing connection on mount
@@ -63,7 +61,12 @@ export default function SettingsPage() {
         const res = await authFetch(`${API}/settings/aws`);
         if (res.ok) {
           const data = await res.json();
-          setAwsConfig((prev) => ({ ...prev, connected: data.connected, region: data.region || "us-east-1" }));
+          setAwsConfig((prev) => ({
+            ...prev,
+            connected: data.connected,
+            external_id: data.external_id || "",
+            role_arn: data.role_arn || "",
+          }));
         }
       } catch {
         // Backend may not be running
@@ -91,11 +94,7 @@ export default function SettingsPage() {
       const res = await authFetch(`${API}/settings/aws`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          access_key_id: awsConfig.access_key_id,
-          secret_access_key: awsConfig.secret_access_key,
-          region: awsConfig.region,
-        }),
+        body: JSON.stringify({ role_arn: awsConfig.role_arn }),
       });
 
       if (!res.ok) {
@@ -134,17 +133,6 @@ export default function SettingsPage() {
       setGithubSaving(false);
     }
   };
-
-  const regions = [
-    "us-east-1",
-    "us-east-2",
-    "us-west-1",
-    "us-west-2",
-    "eu-west-1",
-    "eu-central-1",
-    "ap-southeast-1",
-    "ap-northeast-1",
-  ];
 
   return (
     <div className="min-h-screen bg-grid">
@@ -189,6 +177,34 @@ export default function SettingsPage() {
           </div>
         </motion.div>
 
+        {/* Billing & Plan */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.075, duration: 0.4 }}
+          className="glass mb-6 rounded-xl p-6"
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-sky-500/10 text-lg">
+                💳
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-white">Billing & Plan</h2>
+                <p className="text-xs text-slate-500">
+                  Current plan: <span className="font-medium text-slate-300">{isPro ? "Pro" : "Free"}</span>
+                </p>
+              </div>
+            </div>
+            <Link
+              href="/settings/billing"
+              className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+            >
+              Manage plan
+            </Link>
+          </div>
+        </motion.div>
+
         {/* AWS Credentials */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}
@@ -215,71 +231,83 @@ export default function SettingsPage() {
 
           {awsConfig.connected ? (
             <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-4">
-              <p className="text-sm text-emerald-300">
-                Your AWS account is connected. Region: <span className="font-mono">{awsConfig.region}</span>
-              </p>
+              <p className="text-sm text-emerald-300">Your AWS account is connected via IAM role.</p>
+              <p className="mt-1 break-all font-mono text-xs text-emerald-400/80">{awsConfig.role_arn}</p>
               <button
                 onClick={() => setAwsConfig((prev) => ({ ...prev, connected: false }))}
                 className="mt-2 text-xs text-slate-400 underline hover:text-white transition"
               >
-                Update credentials
+                Update role
               </button>
             </div>
           ) : (
             <div className="space-y-4">
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  Access Key ID
+                  Step 1 — Your External ID
+                </label>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 truncate rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-mono text-sky-300">
+                    {awsConfig.external_id || "Loading..."}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => awsConfig.external_id && navigator.clipboard.writeText(awsConfig.external_id)}
+                    className="shrink-0 rounded-lg border border-slate-600 px-3 py-2.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p className="mt-1.5 text-xs text-slate-500">
+                  You&apos;ll paste this into the CloudFormation stack in step 2.
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-300">
+                  Step 2 — Deploy the access role
+                </label>
+                <a
+                  href="/nimbus-cross-account-role.yaml"
+                  download
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+                >
+                  ⬇ Download CloudFormation template
+                </a>
+                <p className="mt-1.5 text-xs text-slate-500">
+                  In the AWS Console, go to CloudFormation → Create stack → Upload this template,
+                  paste your External ID from step 1 as the <span className="font-mono">ExternalId</span>{" "}
+                  parameter, and deploy.
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-300">
+                  Step 3 — Paste the Role ARN
                 </label>
                 <input
                   type="text"
-                  value={awsConfig.access_key_id}
-                  onChange={(e) => setAwsConfig((prev) => ({ ...prev, access_key_id: e.target.value }))}
-                  placeholder="AKIA..."
+                  value={awsConfig.role_arn}
+                  onChange={(e) => setAwsConfig((prev) => ({ ...prev, role_arn: e.target.value }))}
+                  placeholder="arn:aws:iam::123456789012:role/NimbusAccessRole"
                   className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 font-mono"
                 />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  Secret Access Key
-                </label>
-                <input
-                  type="password"
-                  value={awsConfig.secret_access_key}
-                  onChange={(e) => setAwsConfig((prev) => ({ ...prev, secret_access_key: e.target.value }))}
-                  placeholder="Your secret key"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                  Region
-                </label>
-                <select
-                  value={awsConfig.region}
-                  onChange={(e) => setAwsConfig((prev) => ({ ...prev, region: e.target.value }))}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white outline-none transition focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30"
-                >
-                  {regions.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
+                <p className="mt-1.5 text-xs text-slate-500">
+                  Copy this from the stack&apos;s Outputs tab once it finishes creating.
+                </p>
               </div>
 
               <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
                 <p className="text-xs text-amber-300/80">
-                  Your credentials are encrypted and only used to manage resources in your AWS account.
-                  We recommend creating an IAM user with limited permissions.
+                  Nimbus never sees or stores a long-lived AWS key — it requests short-lived,
+                  expiring credentials from this role only when it needs to act on your account.
+                  Revoke access anytime by deleting the CloudFormation stack.
                 </p>
               </div>
 
               {awsStatus === "error" && (
                 <div className="rounded-lg bg-red-500/5 border border-red-500/20 p-3">
-                  <p className="text-xs text-red-400">{awsError || "Failed to connect. Check your credentials."}</p>
+                  <p className="text-xs text-red-400">{awsError || "Failed to connect. Check the role ARN."}</p>
                 </div>
               )}
 
@@ -291,7 +319,7 @@ export default function SettingsPage() {
 
               <button
                 onClick={saveAWS}
-                disabled={awsSaving || !awsConfig.access_key_id || !awsConfig.secret_access_key}
+                disabled={awsSaving || !awsConfig.role_arn}
                 className="w-full rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:brightness-110 disabled:opacity-40"
               >
                 {awsSaving ? "Connecting..." : "Connect AWS Account"}
@@ -413,46 +441,12 @@ export default function SettingsPage() {
               </label>
             </div>
 
-            <div className="flex items-center justify-between rounded-lg bg-slate-800/50 p-4">
-              <div>
-                <p className="text-sm font-medium text-white">Auto-stop Idle Instances</p>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Bodyguard will automatically stop instances with &lt;5% CPU for 30+ minutes
-                </p>
-              </div>
-              <label className="relative inline-flex cursor-pointer items-center">
-                <input
-                  type="checkbox"
-                  checked={autoStop}
-                  onChange={(e) => {
-                    setAutoStop(e.target.checked);
-                    localStorage.setItem("nimbus_auto_stop", JSON.stringify(e.target.checked));
-                  }}
-                  className="peer sr-only"
-                />
-                <div className="peer h-6 w-11 rounded-full bg-slate-700 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-sky-500 peer-checked:after:translate-x-full peer-checked:after:bg-white" />
-              </label>
-            </div>
-
-            <div className="flex items-center justify-between rounded-lg bg-slate-800/50 p-4">
-              <div>
-                <p className="text-sm font-medium text-white">Budget Alerts</p>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Get notified when approaching free tier limits
-                </p>
-              </div>
-              <label className="relative inline-flex cursor-pointer items-center">
-                <input
-                  type="checkbox"
-                  checked={budgetAlerts}
-                  onChange={(e) => {
-                    setBudgetAlerts(e.target.checked);
-                    localStorage.setItem("nimbus_budget_alerts", JSON.stringify(e.target.checked));
-                  }}
-                  className="peer sr-only"
-                />
-                <div className="peer h-6 w-11 rounded-full bg-slate-700 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-sky-500 peer-checked:after:translate-x-full peer-checked:after:bg-white" />
-              </label>
+            <div className="rounded-lg bg-slate-800/50 p-4">
+              <p className="text-sm font-medium text-white">Bodyguard Auto-stop</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Always on — Bodyguard automatically stops Nimbus-managed instances with &lt;5% CPU for 30+ minutes
+                and alerts you before it does. There&apos;s no off switch yet.
+              </p>
             </div>
           </div>
         </motion.div>

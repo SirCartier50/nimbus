@@ -13,9 +13,9 @@ def generate_files(plan: dict, results: list) -> dict:
     files["setup.sh"] = _setup_script(successful)
     files["teardown.sh"] = _teardown_script(successful)
 
-    has_ec2 = any(r.get("resource_type") == "ec2" for r in successful)
-    has_lambda = any(r.get("resource_type") == "lambda" for r in successful)
-    has_dynamodb = any(r.get("resource_type") == "dynamodb" for r in successful)
+    has_ec2 = any(r.get("resource_type") == "ec2_instance" for r in successful)
+    has_lambda = any(r.get("resource_type") == "lambda_function" for r in successful)
+    has_dynamodb = any(r.get("resource_type") == "dynamodb_table" for r in successful)
 
     if has_ec2:
         files["docker-compose.yml"] = _docker_compose(successful)
@@ -67,19 +67,19 @@ def _setup_script(results: list) -> str:
         rid = r.get("resource_id", "")
         name = r.get("name", "")
 
-        if rtype == "ec2":
+        if rtype == "ec2_instance":
             lines.append(f'echo "Checking EC2 instance: {name} ({rid})"')
             lines.append(f'aws ec2 describe-instances --instance-ids {rid} --query "Reservations[0].Instances[0].State.Name" --output text')
             lines.append("")
-        elif rtype == "s3":
+        elif rtype == "s3_bucket":
             lines.append(f'echo "Checking S3 bucket: {rid}"')
             lines.append(f"aws s3 ls s3://{rid}/ 2>/dev/null && echo 'Bucket exists' || echo 'Bucket not accessible'")
             lines.append("")
-        elif rtype == "dynamodb":
+        elif rtype == "dynamodb_table":
             lines.append(f'echo "Checking DynamoDB table: {rid}"')
             lines.append(f'aws dynamodb describe-table --table-name {rid} --query "Table.TableStatus" --output text')
             lines.append("")
-        elif rtype == "lambda":
+        elif rtype == "lambda_function":
             lines.append(f'echo "Checking Lambda function: {rid}"')
             lines.append(f'aws lambda get-function --function-name {rid} --query "Configuration.State" --output text')
             lines.append("")
@@ -106,16 +106,16 @@ def _teardown_script(results: list) -> str:
         rtype = r.get("resource_type")
         rid = r.get("resource_id", "")
 
-        if rtype == "ec2":
+        if rtype == "ec2_instance":
             lines.append(f'echo "Terminating EC2 instance: {rid}"')
             lines.append(f"aws ec2 terminate-instances --instance-ids {rid}")
-        elif rtype == "s3":
+        elif rtype == "s3_bucket":
             lines.append(f'echo "Deleting S3 bucket: {rid}"')
             lines.append(f"aws s3 rb s3://{rid} --force")
-        elif rtype == "dynamodb":
+        elif rtype == "dynamodb_table":
             lines.append(f'echo "Deleting DynamoDB table: {rid}"')
             lines.append(f"aws dynamodb delete-table --table-name {rid}")
-        elif rtype == "lambda":
+        elif rtype == "lambda_function":
             lines.append(f'echo "Deleting Lambda function: {rid}"')
             lines.append(f"aws lambda delete-function --function-name {rid}")
 
@@ -126,7 +126,7 @@ def _teardown_script(results: list) -> str:
 
 
 def _docker_compose(results: list) -> str:
-    ec2_instances = [r for r in results if r.get("resource_type") == "ec2"]
+    ec2_instances = [r for r in results if r.get("resource_type") == "ec2_instance"]
     lines = [
         "# Docker Compose for Nimbus-deployed infrastructure",
         f"# Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
@@ -149,7 +149,7 @@ def _docker_compose(results: list) -> str:
             "",
         ])
 
-    dynamo = [r for r in results if r.get("resource_type") == "dynamodb"]
+    dynamo = [r for r in results if r.get("resource_type") == "dynamodb_table"]
     if dynamo:
         lines.extend([
             "  dynamodb-local:",
@@ -164,7 +164,7 @@ def _docker_compose(results: list) -> str:
 
 
 def _lambda_deploy_script(results: list) -> str:
-    lambdas = [r for r in results if r.get("resource_type") == "lambda"]
+    lambdas = [r for r in results if r.get("resource_type") == "lambda_function"]
     lines = [
         "#!/bin/bash",
         "# Lambda Deployment Script",
@@ -187,7 +187,7 @@ def _lambda_deploy_script(results: list) -> str:
 
 
 def _dynamo_seed_script(results: list) -> str:
-    tables = [r for r in results if r.get("resource_type") == "dynamodb"]
+    tables = [r for r in results if r.get("resource_type") == "dynamodb_table"]
     lines = [
         "#!/usr/bin/env python3",
         '"""Seed script for DynamoDB tables created by Nimbus."""',

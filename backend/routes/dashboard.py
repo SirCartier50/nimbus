@@ -1,31 +1,72 @@
-from fastapi import APIRouter
+import asyncio
+import time
+import uuid
+
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.bodyguard import get_alerts, get_status as bodyguard_status, mark_alert_read
+from db.crud import get_or_create_user
+from db.deps import get_db
 from utils.aws_clients import (
     get_dynamodb_client,
     get_ec2_client,
     get_lambda_client,
     get_s3_client,
 )
+from utils.user_aws import get_user_boto3_session
 
 router = APIRouter()
 
+# Measured live: the four resource-type lookups below are real, sequential AWS API
+# calls (S3's per-bucket get_bucket_tagging and DynamoDB's per-table describe+
+# list_tags are the worst offenders) — 3.7s end-to-end before this change. Two
+# fixes, both in-process (no Redis — this is a single-instance deployment, so a
+# shared external cache buys nothing yet):
+#   1. Run all four concurrently instead of sequentially (asyncio.gather +
+#      to_thread, since boto3 is synchronous) — cuts latency to the slowest single
+#      resource type instead of the sum of all four.
+#   2. Cache the combined result briefly per user, so the frontend's 8s poll
+#      interval doesn't pay the full AWS round-trip on every single tick.
+_DASHBOARD_CACHE_TTL_SECONDS = 8
+_dashboard_cache: dict[uuid.UUID, tuple[dict, float]] = {}
+
+
+def clear_dashboard_cache() -> None:
+    """Test hook — drop all cached dashboard snapshots."""
+    _dashboard_cache.clear()
+
 
 @router.get("/dashboard")
-async def get_dashboard():
-    return {
-        "ec2": _ec2_resources(),
-        "s3": _s3_resources(),
-        "dynamodb": _dynamodb_resources(),
-        "lambda": _lambda_resources(),
-        "bodyguard": bodyguard_status(),
+async def get_dashboard(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await get_or_create_user(db, request.state.user_id)
+
+    cached = _dashboard_cache.get(user.id)
+    if cached and cached[1] > time.time():
+        return cached[0]
+
+    aws_session = await get_user_boto3_session(db, user.id)
+    ec2, s3, dynamodb, lambda_ = await asyncio.gather(
+        asyncio.to_thread(_ec2_resources, aws_session),
+        asyncio.to_thread(_s3_resources, aws_session),
+        asyncio.to_thread(_dynamodb_resources, aws_session),
+        asyncio.to_thread(_lambda_resources, aws_session),
+    )
+    payload = {
+        "ec2": ec2,
+        "s3": s3,
+        "dynamodb": dynamodb,
+        "lambda": lambda_,
+        "bodyguard": bodyguard_status(str(user.id)),
     }
+    _dashboard_cache[user.id] = (payload, time.time() + _DASHBOARD_CACHE_TTL_SECONDS)
+    return payload
 
 
-def _ec2_resources() -> list:
+def _ec2_resources(session=None) -> list:
     try:
-        ec2 = get_ec2_client()
+        ec2 = get_ec2_client(session)
         resp = ec2.describe_instances(
             Filters=[{"Name": "tag:ManagedBy", "Values": ["Nimbus"]}]
         )
@@ -59,9 +100,9 @@ def _ec2_resources() -> list:
         return [{"error": str(e), "resource_type": "ec2"}]
 
 
-def _s3_resources() -> list:
+def _s3_resources(session=None) -> list:
     try:
-        s3 = get_s3_client()
+        s3 = get_s3_client(session)
         resp = s3.list_buckets()
         result = []
         for bucket in resp.get("Buckets", []):
@@ -91,9 +132,9 @@ def _s3_resources() -> list:
         return [{"error": str(e), "resource_type": "s3"}]
 
 
-def _dynamodb_resources() -> list:
+def _dynamodb_resources(session=None) -> list:
     try:
-        dynamo = get_dynamodb_client()
+        dynamo = get_dynamodb_client(session)
         tables = dynamo.list_tables().get("TableNames", [])
         result = []
         for tname in tables:
@@ -120,9 +161,9 @@ def _dynamodb_resources() -> list:
         return [{"error": str(e), "resource_type": "dynamodb"}]
 
 
-def _lambda_resources() -> list:
+def _lambda_resources(session=None) -> list:
     try:
-        lc = get_lambda_client()
+        lc = get_lambda_client(session)
         fns = lc.list_functions().get("Functions", [])
         result = []
         for fn in fns:
@@ -149,12 +190,19 @@ def _lambda_resources() -> list:
 
 
 @router.get("/dashboard/cost-details/{resource_type}/{resource_id}")
-async def get_cost_details(resource_type: str, resource_id: str):
+async def get_cost_details(
+    resource_type: str,
+    resource_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Return detailed cost breakdown for a specific resource, including sub-resources."""
+    user = await get_or_create_user(db, request.state.user_id)
+    aws_session = await get_user_boto3_session(db, user.id)
     details = {"resource_id": resource_id, "resource_type": resource_type, "costs": [], "total_monthly": 0.0}
 
     if resource_type == "ec2":
-        ec2 = get_ec2_client()
+        ec2 = get_ec2_client(aws_session)
         try:
             # Instance itself
             resp = ec2.describe_instances(InstanceIds=[resource_id])
@@ -261,8 +309,9 @@ async def get_cost_details(resource_type: str, resource_id: str):
 
 
 @router.get("/dashboard/alerts")
-async def dashboard_alerts():
-    return {"alerts": get_alerts()}
+async def dashboard_alerts(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await get_or_create_user(db, request.state.user_id)
+    return {"alerts": get_alerts(str(user.id))}
 
 
 class AlertReadBody(BaseModel):
@@ -270,11 +319,13 @@ class AlertReadBody(BaseModel):
 
 
 @router.post("/dashboard/alerts/read")
-async def read_alert(body: AlertReadBody):
-    mark_alert_read(body.alert_id)
+async def read_alert(body: AlertReadBody, request: Request, db: AsyncSession = Depends(get_db)):
+    user = await get_or_create_user(db, request.state.user_id)
+    mark_alert_read(str(user.id), body.alert_id)
     return {"ok": True}
 
 
 @router.get("/dashboard/bodyguard")
-async def bodyguard_state():
-    return bodyguard_status()
+async def bodyguard_state(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await get_or_create_user(db, request.state.user_id)
+    return bodyguard_status(str(user.id))

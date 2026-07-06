@@ -9,10 +9,11 @@ load_dotenv()
 
 from agents.bodyguard import start_bodyguard, stop_bodyguard
 from auth import auth_middleware
+from db.engine import engine
 from routes.chat import router as chat_router
 from routes.dashboard import router as dashboard_router
+from routes.sessions import router as sessions_router
 from routes.settings import router as settings_router
-from routes.workspace import router as workspace_router
 
 
 @asynccontextmanager
@@ -20,11 +21,12 @@ async def lifespan(app: FastAPI):
     start_bodyguard()
     yield
     stop_bodyguard()
+    await engine.dispose()
 
 
 app = FastAPI(
     title="Nimbus AI",
-    description="Agentic AWS Management System — Amazon Nova AI Hackathon",
+    description="Agentic AWS Management System",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -45,8 +47,8 @@ app.middleware("http")(auth_middleware)
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
+app.include_router(sessions_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
-app.include_router(workspace_router, prefix="/api")
 
 
 @app.get("/health")

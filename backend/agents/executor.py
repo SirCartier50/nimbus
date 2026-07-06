@@ -1,22 +1,38 @@
 import io
 import json
-import os
-import time
-import uuid
 import zipfile
 
-from utils.aws_clients import (
-    get_dynamodb_client,
-    get_ec2_client,
-    get_iam_client,
-    get_lambda_client,
-    get_s3_client,
-    get_sts_client,
+import jsonschema
+
+from providers import aws_registry as registry
+from providers import cloud_control
+from providers.aws_dispatch import call, client_for, get_resource_status, json_safe, list_resources
+from providers.aws_schema import (
+    COLLAPSED_DESCRIPTION,
+    generate_tool_schema,
+    generate_validation_schema,
+    get_operation_summary,
 )
+from utils.aws_clients import get_iam_client, get_sts_client
 from utils.tool_use import run_tool_loop
 
-NIMBUS_TAG = [{"Key": "ManagedBy", "Value": "Nimbus"}]
-FREE_TIER_TYPES = ("t2.micro", "t3.micro")
+NIMBUS_TAGS = {"ManagedBy": "Nimbus"}
+FREE_TIER_EC2_TYPES = ("t2.micro", "t3.micro")
+_RESOURCE_TYPE_ENUM = sorted(registry.REGISTRY)
+
+
+def _validation_view(obj):
+    """jsonschema's "string" type check rejects raw bytes. Blob fields (e.g.
+    Lambda's Code.ZipFile) are real bytes by the time we validate, so swap
+    them for a placeholder just for the validation call — the actual bytes
+    still go to boto3 unchanged."""
+    if isinstance(obj, bytes):
+        return ""
+    if isinstance(obj, dict):
+        return {k: _validation_view(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_validation_view(v) for v in obj]
+    return obj
 
 
 def _get_latest_ami(ec2_client) -> str:
@@ -36,32 +52,9 @@ def _get_latest_ami(ec2_client) -> str:
     return "ami-0c55b159cbfafe1f0"
 
 
-def _ensure_security_group(ec2_client, description: str) -> str:
-    resp = ec2_client.describe_security_groups(
-        Filters=[{"Name": "group-name", "Values": ["nimbus-sg"]}]
-    )
-    if resp["SecurityGroups"]:
-        return resp["SecurityGroups"][0]["GroupId"]
-
-    sg = ec2_client.create_security_group(
-        GroupName="nimbus-sg",
-        Description=description or "Nimbus security group",
-    )
-    sg_id = sg["GroupId"]
-    ec2_client.authorize_security_group_ingress(
-        GroupId=sg_id,
-        IpPermissions=[
-            {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-            {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-            {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
-        ],
-    )
-    return sg_id
-
-
-def _ensure_lambda_role() -> str:
-    iam = get_iam_client()
-    sts = get_sts_client()
+def _ensure_lambda_role(session=None) -> str:
+    iam = get_iam_client(session)
+    sts = get_sts_client(session)
     account_id = sts.get_caller_identity()["Account"]
     role_name = "nimbus-lambda-role"
     role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
@@ -90,431 +83,325 @@ def _ensure_lambda_role() -> str:
     return role_arn
 
 
-# ---------------------------------------------------------------------------
-# Tool handlers — called by the AI via tool use
-# ---------------------------------------------------------------------------
-
-_free_tier_mode = True  # set per execution
-
-
-def _handle_create_ec2(params: dict) -> dict:
-    ec2 = get_ec2_client()
-    name = params.get("name", f"nimbus-{uuid.uuid4().hex[:6]}")
-    instance_type = params.get("instance_type", "t2.micro")
-    ami_id = params.get("ami_id") or _get_latest_ami(ec2)
-
-    if _free_tier_mode and instance_type not in FREE_TIER_TYPES:
-        instance_type = "t2.micro"
-
-    sg_id = _ensure_security_group(ec2, params.get("security_group_description", "Nimbus managed"))
-
-    resp = ec2.run_instances(
-        ImageId=ami_id,
-        InstanceType=instance_type,
-        MinCount=1,
-        MaxCount=1,
-        SecurityGroupIds=[sg_id],
-        TagSpecifications=[{
-            "ResourceType": "instance",
-            "Tags": [{"Key": "Name", "Value": name}] + NIMBUS_TAG,
-        }],
-    )
-    inst = resp["Instances"][0]
-    return {
-        "success": True,
-        "resource_type": "ec2",
-        "resource_id": inst["InstanceId"],
-        "name": name,
-        "instance_type": instance_type,
-        "state": inst["State"]["Name"],
-        "message": f"EC2 instance '{name}' ({inst['InstanceId']}) launched",
-    }
-
-
-def _handle_create_s3(params: dict) -> dict:
-    s3 = get_s3_client()
-    region = os.getenv("AWS_REGION", "us-east-1")
-    bucket_name = params.get("bucket_name", f"nimbus-{uuid.uuid4().hex[:8]}")
-
-    if region == "us-east-1":
-        s3.create_bucket(Bucket=bucket_name)
-    else:
-        s3.create_bucket(
-            Bucket=bucket_name,
-            CreateBucketConfiguration={"LocationConstraint": region},
-        )
-    s3.put_bucket_tagging(
-        Bucket=bucket_name,
-        Tagging={"TagSet": NIMBUS_TAG},
-    )
-    return {
-        "success": True,
-        "resource_type": "s3",
-        "resource_id": bucket_name,
-        "name": bucket_name,
-        "message": f"S3 bucket '{bucket_name}' created",
-    }
-
-
-def _handle_create_dynamodb(params: dict) -> dict:
-    dynamo = get_dynamodb_client()
-    table_name = params.get("table_name", f"nimbus-table-{uuid.uuid4().hex[:6]}")
-    pk = params.get("partition_key", "id")
-    sk = params.get("sort_key")
-
-    key_schema = [{"AttributeName": pk, "KeyType": "HASH"}]
-    attr_defs = [{"AttributeName": pk, "AttributeType": "S"}]
-    if sk:
-        key_schema.append({"AttributeName": sk, "KeyType": "RANGE"})
-        attr_defs.append({"AttributeName": sk, "AttributeType": "S"})
-
-    dynamo.create_table(
-        TableName=table_name,
-        KeySchema=key_schema,
-        AttributeDefinitions=attr_defs,
-        BillingMode="PAY_PER_REQUEST",
-        Tags=NIMBUS_TAG,
-    )
-    return {
-        "success": True,
-        "resource_type": "dynamodb",
-        "resource_id": table_name,
-        "name": table_name,
-        "message": f"DynamoDB table '{table_name}' created",
-    }
-
-
-def _handle_create_lambda(params: dict) -> dict:
-    lc = get_lambda_client()
-    function_name = params.get("function_name", f"nimbus-fn-{uuid.uuid4().hex[:6]}")
-    runtime = params.get("runtime", "python3.11")
-    description = params.get("description", "Nimbus managed Lambda function")
-
+def _default_lambda_zip() -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
             "index.py",
             "def handler(event, context):\n    return {'statusCode': 200, 'body': 'Hello from Nimbus!'}\n",
         )
-    buf.seek(0)
+    return buf.getvalue()
 
-    role_arn = _ensure_lambda_role()
 
-    for _ in range(6):
-        try:
-            lc.create_function(
-                FunctionName=function_name,
-                Runtime=runtime,
-                Role=role_arn,
-                Handler="index.handler",
-                Code={"ZipFile": buf.read()},
-                Description=description,
-                Timeout=30,
-                MemorySize=128,
-                Tags={"ManagedBy": "Nimbus"},
-            )
-            break
-        except lc.exceptions.InvalidParameterValueException as e:
-            if "role" in str(e).lower():
-                time.sleep(5)
-                buf.seek(0)
-            else:
-                raise
+def _empty_s3_bucket(s3_client, bucket_name: str) -> None:
+    try:
+        paginator = s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket_name):
+            objects = page.get("Contents", [])
+            if objects:
+                s3_client.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
+                )
+    except Exception:
+        pass
+
+
+def _apply_create_fallbacks(resource_type: str, config: dict, client, session, free_tier_mode: bool) -> dict:
+    """The model fills in real AWS config from the AWS-sourced schema for
+    everything it's capable of deciding (names, sizes, settings...). These are
+    the few fields it genuinely cannot supply itself — a deployable code blob,
+    an IAM role that doesn't exist yet, an AMI id, or this account's region —
+    not stand-ins for fields the model should be choosing on its own."""
+    config = dict(config)
+
+    if resource_type == "ec2_instance":
+        instance_type = config.get("InstanceType") or ("t2.micro" if free_tier_mode else "t3.micro")
+        if free_tier_mode and instance_type not in FREE_TIER_EC2_TYPES:
+            instance_type = "t2.micro"
+        config["InstanceType"] = instance_type
+        config.setdefault("MinCount", 1)
+        config.setdefault("MaxCount", 1)
+        if not config.get("ImageId"):
+            config["ImageId"] = _get_latest_ami(client)
+
+    elif resource_type == "s3_bucket":
+        region = client.meta.region_name
+        if region != "us-east-1" and "CreateBucketConfiguration" not in config:
+            config["CreateBucketConfiguration"] = {"LocationConstraint": region}
+
+    elif resource_type == "lambda_function":
+        if not config.get("Role"):
+            config["Role"] = _ensure_lambda_role(session)
+        if not config.get("Code"):
+            config["Code"] = {"ZipFile": _default_lambda_zip()}
+        config.setdefault("Handler", "index.handler")
+        config.setdefault("Runtime", "python3.12")
+
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Generic tool handlers — one create/status/list/delete path for all 15 types
+# ---------------------------------------------------------------------------
+
+
+def _handle_create(resource_type: str, params: dict, session=None, free_tier_mode: bool = True) -> dict:
+    spec = registry.get_spec(resource_type)
+    client = client_for(resource_type, session)
+    config = _apply_create_fallbacks(resource_type, params, client, session, free_tier_mode)
+
+    validation_schema = generate_validation_schema(spec.service, spec.create_operation)
+    jsonschema.validate(instance=_validation_view(config), schema=validation_schema)
+
+    config = registry.merge_tags_into_config(resource_type, config, NIMBUS_TAGS)
+    response = call(client, spec.create_operation, **config)
+    resource_id = registry.extract_resource_id(resource_type, response, config)
+
+    tag_call = registry.get_post_create_tag_call(resource_type, response, resource_id, NIMBUS_TAGS)
+    if tag_call:
+        call(client, tag_call["operation"], **tag_call["params"])
 
     return {
         "success": True,
-        "resource_type": "lambda",
-        "resource_id": function_name,
-        "name": function_name,
-        "message": f"Lambda function '{function_name}' created",
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "name": resource_id,
+        "message": f"{resource_type.replace('_', ' ')} '{resource_id}' created",
+        "details": json_safe(response),
     }
 
 
-def _handle_stop_ec2(params: dict) -> dict:
-    ec2 = get_ec2_client()
+def _handle_delete(resource_type: str, params: dict, session=None) -> dict:
+    spec = registry.get_spec(resource_type)
+    client = client_for(resource_type, session)
+    resource_id = params["resource_id"]
+
+    if resource_type == "s3_bucket":
+        _empty_s3_bucket(client, resource_id)
+
+    delete_kwargs = registry.build_id_kwargs(resource_type, resource_id, "delete")
+
+    if spec.delete_requires_etag:
+        describe_kwargs = registry.build_id_kwargs(resource_type, resource_id, "describe")
+        current = call(client, spec.describe_operation, **describe_kwargs)
+        delete_kwargs["IfMatch"] = current["ETag"]
+
+    call(client, spec.delete_operation, **delete_kwargs)
+    return {
+        "success": True,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "message": f"{resource_type.replace('_', ' ')} '{resource_id}' deleted",
+    }
+
+
+def _handle_stop_ec2(params: dict, session=None) -> dict:
+    ec2 = client_for("ec2_instance", session)
     instance_id = params["instance_id"]
     ec2.stop_instances(InstanceIds=[instance_id])
     return {
         "success": True,
-        "resource_type": "ec2",
+        "resource_type": "ec2_instance",
         "resource_id": instance_id,
         "message": f"EC2 instance '{instance_id}' is stopping",
     }
 
 
-def _handle_terminate_ec2(params: dict) -> dict:
-    ec2 = get_ec2_client()
-    instance_id = params["instance_id"]
-    ec2.terminate_instances(InstanceIds=[instance_id])
-    return {
-        "success": True,
-        "resource_type": "ec2",
-        "resource_id": instance_id,
-        "message": f"EC2 instance '{instance_id}' is terminating",
-    }
+# ---------------------------------------------------------------------------
+# Generic Cloud Control handlers — CRUD over any CloudFormation resource type by
+# its TypeName + desired-state, for the long tail beyond the curated registry.
+# The ManagedBy=Nimbus tag is still injected so Bodyguard sees these resources.
+# ---------------------------------------------------------------------------
 
 
-def _handle_delete_s3(params: dict) -> dict:
-    s3 = get_s3_client()
-    bucket_name = params["bucket_name"]
-    # Empty the bucket first
-    try:
-        objects = s3.list_objects_v2(Bucket=bucket_name).get("Contents", [])
-        if objects:
-            s3.delete_objects(
-                Bucket=bucket_name,
-                Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
-            )
-    except Exception:
-        pass
-    s3.delete_bucket(Bucket=bucket_name)
-    return {
-        "success": True,
-        "resource_type": "s3",
-        "resource_id": bucket_name,
-        "message": f"S3 bucket '{bucket_name}' deleted",
-    }
+def _handle_cc_create(params: dict, session=None) -> dict:
+    return cloud_control.create_resource(params["type_name"], params.get("config") or {}, tags=NIMBUS_TAGS, session=session)
 
 
-def _handle_delete_dynamodb(params: dict) -> dict:
-    dynamo = get_dynamodb_client()
-    table_name = params["table_name"]
-    dynamo.delete_table(TableName=table_name)
-    return {
-        "success": True,
-        "resource_type": "dynamodb",
-        "resource_id": table_name,
-        "message": f"DynamoDB table '{table_name}' deleted",
-    }
+def _handle_cc_get(params: dict, session=None) -> dict:
+    return cloud_control.get_resource(params["type_name"], params["resource_id"], session)
 
 
-def _handle_delete_lambda(params: dict) -> dict:
-    lc = get_lambda_client()
-    function_name = params["function_name"]
-    lc.delete_function(FunctionName=function_name)
-    return {
-        "success": True,
-        "resource_type": "lambda",
-        "resource_id": function_name,
-        "message": f"Lambda function '{function_name}' deleted",
-    }
+def _handle_cc_list(params: dict, session=None) -> dict:
+    return cloud_control.list_resources(params["type_name"], session)
 
 
-def _handle_list_ec2(params: dict) -> dict:
-    ec2 = get_ec2_client()
-    resp = ec2.describe_instances()
-    instances = []
-    for r in resp.get("Reservations", []):
-        for inst in r.get("Instances", []):
-            if inst["State"]["Name"] == "terminated":
-                continue
-            name = next(
-                (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"),
-                inst["InstanceId"],
-            )
-            instances.append({
-                "instance_id": inst["InstanceId"],
-                "name": name,
-                "state": inst["State"]["Name"],
-                "type": inst.get("InstanceType"),
-            })
-    return {"instances": instances}
-
-
-def _handle_list_s3(params: dict) -> dict:
-    s3 = get_s3_client()
-    resp = s3.list_buckets()
-    return {"buckets": [b["Name"] for b in resp.get("Buckets", [])]}
+def _handle_cc_delete(params: dict, session=None) -> dict:
+    return cloud_control.delete_resource(params["type_name"], params["resource_id"], session)
 
 
 # ---------------------------------------------------------------------------
-# Tool definitions for Bedrock
+# Tool definitions for Bedrock — one create_<resource_type> tool per registry
+# entry, generated straight from botocore's shape for that operation, plus a
+# handful of generic tools for the parts of CRUD that don't need per-type
+# schemas (status/list/delete just need a resource_type + id).
 # ---------------------------------------------------------------------------
 
-CREATE_TOOLS = [
+
+def _generate_full_tool_schema(spec: registry.ResourceSpec, max_attempts: int = 3) -> dict:
+    """generate_tool_schema's default depth covers every resource type in the
+    registry except a few single-wrapper operations (e.g. CloudFront's
+    CreateDistribution has exactly one top-level field holding all the real
+    content). Escalate depth until nothing's collapsed, rather than hardcoding
+    a per-service override that'd go stale if AWS reshapes an API."""
+    depth = 2
+    schema = generate_tool_schema(spec.service, spec.create_operation, max_depth=depth)
+    attempts = 1
+    while COLLAPSED_DESCRIPTION in json.dumps(schema) and attempts < max_attempts:
+        depth += 1
+        schema = generate_tool_schema(spec.service, spec.create_operation, max_depth=depth)
+        attempts += 1
+    return schema
+
+
+def _build_create_tool(resource_type: str, spec: registry.ResourceSpec) -> dict:
+    return {
+        "toolSpec": {
+            "name": f"create_{resource_type}",
+            "description": (
+                get_operation_summary(spec.service, spec.create_operation)
+                or f"Create a {resource_type.replace('_', ' ')}."
+            ),
+            "inputSchema": {"json": _generate_full_tool_schema(spec)},
+        }
+    }
+
+
+CREATE_TOOLS = [_build_create_tool(rt, spec) for rt, spec in registry.REGISTRY.items()]
+
+GENERIC_TOOLS = [
     {
         "toolSpec": {
-            "name": "create_ec2_instance",
-            "description": "Launch a new EC2 instance. Returns the instance ID and state.",
+            "name": "get_resource_status",
+            "description": "Look up the current live status/details of a resource Nimbus previously created, straight from AWS.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Name tag for the instance"},
-                        "instance_type": {"type": "string", "description": "EC2 instance type, e.g. t2.micro"},
-                        "ami_id": {"type": "string", "description": "AMI ID. Leave empty for latest Amazon Linux 2."},
-                        "security_group_description": {"type": "string", "description": "Description for security group"},
+                        "resource_type": {"type": "string", "enum": _RESOURCE_TYPE_ENUM},
+                        "resource_id": {"type": "string", "description": "The id returned when the resource was created"},
                     },
-                    "required": ["name"],
+                    "required": ["resource_type", "resource_id"],
                 }
             },
         }
     },
     {
         "toolSpec": {
-            "name": "create_s3_bucket",
-            "description": "Create a new S3 bucket. Bucket names must be globally unique.",
+            "name": "list_resources",
+            "description": "List every resource of a given type that currently exists in this AWS account.",
             "inputSchema": {
                 "json": {
                     "type": "object",
-                    "properties": {
-                        "bucket_name": {"type": "string", "description": "Globally unique bucket name"},
-                    },
-                    "required": ["bucket_name"],
-                }
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "create_dynamodb_table",
-            "description": "Create a new DynamoDB table with on-demand billing.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "table_name": {"type": "string", "description": "Table name"},
-                        "partition_key": {"type": "string", "description": "Partition key attribute name"},
-                        "sort_key": {"type": "string", "description": "Optional sort key attribute name"},
-                    },
-                    "required": ["table_name", "partition_key"],
-                }
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "create_lambda_function",
-            "description": "Create a new Lambda function with a hello-world handler.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "function_name": {"type": "string", "description": "Function name"},
-                        "runtime": {"type": "string", "description": "Runtime, e.g. python3.11"},
-                        "description": {"type": "string", "description": "Function description"},
-                    },
-                    "required": ["function_name"],
+                    "properties": {"resource_type": {"type": "string", "enum": _RESOURCE_TYPE_ENUM}},
+                    "required": ["resource_type"],
                 }
             },
         }
     },
 ]
 
-DESTRUCTIVE_TOOLS = [
-    {
-        "toolSpec": {
-            "name": "stop_ec2_instance",
-            "description": "Stop a running EC2 instance. The instance can be started again later.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "instance_id": {"type": "string", "description": "EC2 instance ID"},
-                    },
-                    "required": ["instance_id"],
-                }
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "terminate_ec2_instance",
-            "description": "Permanently terminate an EC2 instance. This cannot be undone.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "instance_id": {"type": "string", "description": "EC2 instance ID"},
-                    },
-                    "required": ["instance_id"],
-                }
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "delete_s3_bucket",
-            "description": "Delete an S3 bucket and all its contents. This cannot be undone.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "bucket_name": {"type": "string", "description": "Bucket name to delete"},
-                    },
-                    "required": ["bucket_name"],
-                }
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "delete_dynamodb_table",
-            "description": "Delete a DynamoDB table and all its data. This cannot be undone.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "table_name": {"type": "string", "description": "Table name to delete"},
-                    },
-                    "required": ["table_name"],
-                }
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "delete_lambda_function",
-            "description": "Delete a Lambda function. This cannot be undone.",
-            "inputSchema": {
-                "json": {
-                    "type": "object",
-                    "properties": {
-                        "function_name": {"type": "string", "description": "Function name to delete"},
-                    },
-                    "required": ["function_name"],
-                }
-            },
-        }
-    },
-]
-
-READ_TOOLS = [
-    {
-        "toolSpec": {
-            "name": "list_ec2_instances",
-            "description": "List EC2 instances to verify state after operations.",
-            "inputSchema": {
-                "json": {"type": "object", "properties": {}, "required": []}
-            },
-        }
-    },
-    {
-        "toolSpec": {
-            "name": "list_s3_buckets",
-            "description": "List S3 buckets to verify operations.",
-            "inputSchema": {
-                "json": {"type": "object", "properties": {}, "required": []}
-            },
-        }
-    },
-]
-
-CREATE_HANDLERS = {
-    "create_ec2_instance": _handle_create_ec2,
-    "create_s3_bucket": _handle_create_s3,
-    "create_dynamodb_table": _handle_create_dynamodb,
-    "create_lambda_function": _handle_create_lambda,
-    "list_ec2_instances": _handle_list_ec2,
-    "list_s3_buckets": _handle_list_s3,
+STOP_EC2_TOOL = {
+    "toolSpec": {
+        "name": "stop_ec2_instance",
+        "description": "Stop a running EC2 instance. The instance can be started again later — reversible, unlike delete_resource.",
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {"instance_id": {"type": "string", "description": "EC2 instance ID"}},
+                "required": ["instance_id"],
+            }
+        },
+    }
 }
 
-DESTRUCTIVE_HANDLERS = {
-    "stop_ec2_instance": _handle_stop_ec2,
-    "terminate_ec2_instance": _handle_terminate_ec2,
-    "delete_s3_bucket": _handle_delete_s3,
-    "delete_dynamodb_table": _handle_delete_dynamodb,
-    "delete_lambda_function": _handle_delete_lambda,
+DELETE_TOOL = {
+    "toolSpec": {
+        "name": "delete_resource",
+        "description": "Permanently delete an AWS resource. This cannot be undone.",
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {
+                    "resource_type": {"type": "string", "enum": _RESOURCE_TYPE_ENUM},
+                    "resource_id": {"type": "string"},
+                },
+                "required": ["resource_type", "resource_id"],
+            }
+        },
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Cloud Control (generic) tools — one uniform CRUD interface over ANY AWS resource
+# type by CloudFormation TypeName. Enabled per-call via run_executor(use_cloud_control=True);
+# off by default until the Architect emits CFN-style plans.
+# ---------------------------------------------------------------------------
+
+_CC_TYPE_NAME = {
+    "type": "string",
+    "description": 'CloudFormation resource type name, e.g. "AWS::S3::Bucket", "AWS::EC2::Instance", "AWS::SQS::Queue".',
+}
+
+CLOUD_CONTROL_TOOLS = [
+    {
+        "toolSpec": {
+            "name": "create_resource_by_type",
+            "description": "Create ANY AWS resource by its CloudFormation type name plus a desired-state config. "
+                           "Use this for resource types without a dedicated create_<type> tool.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "type_name": _CC_TYPE_NAME,
+                        "config": {"type": "object", "description": "Desired-state properties (CloudFormation resource schema)."},
+                    },
+                    "required": ["type_name", "config"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "get_resource_by_type",
+            "description": "Look up one resource's current state by CloudFormation type name and identifier.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {"type_name": _CC_TYPE_NAME, "resource_id": {"type": "string"}},
+                    "required": ["type_name", "resource_id"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "list_resources_by_type",
+            "description": "List every resource of a given CloudFormation type name in this account.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {"type_name": _CC_TYPE_NAME},
+                    "required": ["type_name"],
+                }
+            },
+        }
+    },
+]
+
+CC_DELETE_TOOL = {
+    "toolSpec": {
+        "name": "delete_resource_by_type",
+        "description": "Permanently delete ANY AWS resource by CloudFormation type name and identifier. Cannot be undone.",
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {"type_name": _CC_TYPE_NAME, "resource_id": {"type": "string"}},
+                "required": ["type_name", "resource_id"],
+            }
+        },
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -525,17 +412,25 @@ EXECUTOR_PROMPT = """You are Nimbus Executor, an AI agent that deploys and manag
 
 You receive a plan from the Nimbus Architect and execute it step by step using your tools.
 
-RULES:
-1. Execute each step in order
-2. After each tool call, check the result for success or failure
-3. If a step fails, report the error and continue with the remaining steps
-4. After all steps, provide a summary of what succeeded and what failed
-5. Use your read tools (list_ec2_instances, list_s3_buckets) to verify resources were created if needed
+You have one create_<resource_type> tool per curated AWS resource type: ec2_instance, s3_bucket,
+rds_instance, lambda_function, vpc, subnet, security_group, ecs_cluster, load_balancer, api_gateway,
+dynamodb_table, elasticache, cloudfront, nat_gateway, iam_role. Each tool's input fields are the real AWS
+API parameters for that resource (sourced directly from AWS's own API definitions) — use real field names
+and values, not simplified guesses.
 
-Your response should be a clear summary like:
-- What was created/modified/deleted
-- Any errors that occurred
-- The resource IDs of created resources
+For any plan step whose resource_type is a CloudFormation type name ("AWS::Service::Resource") rather than
+one of those 15 short names, use the GENERIC tools instead:
+- create_resource_by_type(type_name, config) — config is the CloudFormation desired-state
+- get_resource_by_type(type_name, resource_id) / list_resources_by_type(type_name)
+- delete_resource_by_type(type_name, resource_id)
+
+RULES:
+1. Execute each plan step in order. For a curated short name, call the matching create_<resource_type> tool;
+   for an "AWS::..." type name, call create_resource_by_type with that step's config
+2. If a tool call is rejected (missing/invalid field), read the error and retry that step with a corrected config
+3. If a step still fails after retrying, report the error and continue with the remaining steps
+4. After all steps, use list_resources / get_resource_status to verify resources were created if needed
+5. Provide a clear summary of what succeeded and what failed, with resource IDs
 
 Keep it concise. The user is a beginner — explain any errors in simple terms."""
 
@@ -544,17 +439,40 @@ Keep it concise. The user is a beginner — explain any errors in simple terms."
 # ---------------------------------------------------------------------------
 
 
-def run_executor(plan: dict, free_tier_mode: bool = True, allow_destructive: bool = False) -> dict:
-    global _free_tier_mode
-    _free_tier_mode = free_tier_mode
+def run_executor(
+    plan: dict,
+    free_tier_mode: bool = True,
+    allow_destructive: bool = False,
+    aws_session=None,
+    provider=None,
+    use_cloud_control: bool = False,
+) -> dict:
+    # Bind session/free_tier_mode per call (closures, not globals) so concurrent
+    # requests from different users never share or stomp each other's state.
+    handlers = {
+        f"create_{rt}": (lambda p, rt=rt: _handle_create(rt, p, aws_session, free_tier_mode))
+        for rt in registry.REGISTRY
+    }
+    handlers["get_resource_status"] = lambda p: get_resource_status(p["resource_type"], p["resource_id"], aws_session)
+    handlers["list_resources"] = lambda p: list_resources(p["resource_type"], aws_session)
+    handlers["stop_ec2_instance"] = lambda p: _handle_stop_ec2(p, aws_session)
 
-    # Build tool config based on what's allowed
-    tools = list(CREATE_TOOLS) + list(READ_TOOLS)
-    handlers = dict(CREATE_HANDLERS)
+    tools = list(CREATE_TOOLS) + list(GENERIC_TOOLS) + [STOP_EC2_TOOL]
 
     if allow_destructive:
-        tools.extend(DESTRUCTIVE_TOOLS)
-        handlers.update(DESTRUCTIVE_HANDLERS)
+        tools.append(DELETE_TOOL)
+        handlers["delete_resource"] = lambda p: _handle_delete(p["resource_type"], p, aws_session)
+
+    # Generic Cloud Control path — breadth over any resource type. Opt-in until the
+    # Architect emits CFN TypeNames.
+    if use_cloud_control:
+        tools += list(CLOUD_CONTROL_TOOLS)
+        handlers["create_resource_by_type"] = lambda p: _handle_cc_create(p, aws_session)
+        handlers["get_resource_by_type"] = lambda p: _handle_cc_get(p, aws_session)
+        handlers["list_resources_by_type"] = lambda p: _handle_cc_list(p, aws_session)
+        if allow_destructive:
+            tools.append(CC_DELETE_TOOL)
+            handlers["delete_resource_by_type"] = lambda p: _handle_cc_delete(p, aws_session)
 
     tool_config = {"tools": tools}
 
@@ -568,6 +486,7 @@ def run_executor(plan: dict, free_tier_mode: bool = True, allow_destructive: boo
         messages=messages,
         tool_config=tool_config,
         tool_handlers=handlers,
+        provider=provider,
     )
 
     # Collect all tool results from the message history for the response

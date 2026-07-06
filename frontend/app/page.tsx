@@ -423,7 +423,7 @@ export default function HeroPage() {
             <span className="text-sm text-slate-500">Nimbus AI</span>
           </div>
           <p className="text-sm text-slate-600">
-            Built for the Amazon Nova AI Hackathon
+            Powered by Amazon Bedrock
           </p>
         </div>
       </footer>
