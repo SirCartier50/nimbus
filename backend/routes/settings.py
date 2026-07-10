@@ -105,3 +105,13 @@ async def set_github_repo(config: GitHubConfig, request: Request, db: AsyncSessi
     await db.commit()
 
     return {"connected": True, "repo_url": config.repo_url}
+
+
+@router.delete("/settings/github")
+async def unlink_github_repo(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await get_user_settings(db, user.id)
+    if settings and settings.github_repo_url:
+        settings.github_repo_url = None
+        await db.commit()
+    return {"connected": False, "repo_url": None}

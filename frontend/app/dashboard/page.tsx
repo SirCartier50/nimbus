@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import Navbar from "../components/Navbar";
@@ -82,7 +82,7 @@ function stateColor(state: string) {
     case "stopping":
       return "bg-amber-500/15 text-amber-400 border-amber-500/25";
     case "pending":
-      return "bg-sky-500/15 text-sky-400 border-sky-500/25";
+      return "bg-ion-500/15 text-ion-400 border-ion-500/25";
     default:
       return "bg-slate-500/15 text-slate-400 border-slate-500/25";
   }
@@ -144,7 +144,7 @@ function ResourceCard({ resource, isSelected, onSelect }: { resource: Resource; 
     <div
       onClick={onSelect}
       className={`glass group rounded-xl p-5 transition-all duration-200 cursor-pointer ${
-        isSelected ? "border-sky-500/50 ring-1 ring-sky-500/30" : "hover:border-sky-500/30 glow-blue-hover"
+        isSelected ? "border-ion-500/50 ring-1 ring-ion-500/30" : "hover:border-ion-500/30 glow-blue-hover"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -215,11 +215,11 @@ function CostDetailsPanel({ details, onClose }: { details: CostDetails; onClose:
       initial={{ opacity: 0, y: -8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -8 }}
-      className="glass rounded-xl p-5 border border-sky-500/20"
+      className="glass rounded-xl p-5 border border-ion-500/20"
     >
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <svg className="h-4 w-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          <svg className="h-4 w-4 text-ion-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
           <p className="text-sm font-semibold text-white">Cost Breakdown</p>
         </div>
         <button onClick={onClose} className="text-slate-500 hover:text-white text-xs">Close</button>
@@ -311,7 +311,7 @@ function BodyguardPanel({ bodyguard }: { bodyguard: BodyguardStatus }) {
               className={`rounded-lg p-3 text-xs ${
                 alert.severity === "warning"
                   ? "border border-amber-500/20 bg-amber-500/5 text-amber-300"
-                  : "border border-sky-500/20 bg-sky-500/5 text-sky-300"
+                  : "border border-ion-500/20 bg-ion-500/5 text-ion-300"
               }`}
             >
               {alert.message}
@@ -368,13 +368,13 @@ function UsageWidget({ ec2Count, s3Count, dynamoCount, lambdaCount, runningEc2 }
       service: "EC2",
       count: ec2Count,
       detail: `${runningEc2} running`,
-      color: "bg-sky-500",
+      color: "bg-ion-500",
     },
     {
       service: "S3",
       count: s3Count,
       detail: `${s3Count} active`,
-      color: "bg-violet-500",
+      color: "bg-ion-500",
     },
     {
       service: "DynamoDB",
@@ -395,7 +395,7 @@ function UsageWidget({ ec2Count, s3Count, dynamoCount, lambdaCount, runningEc2 }
   return (
     <div className="glass rounded-xl p-6">
       <div className="flex items-center gap-3 mb-4">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-sky-500/10 text-sky-400">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-ion-500/10 text-ion-400">
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>
         </div>
         <div>
@@ -421,18 +421,20 @@ function UsageWidget({ ec2Count, s3Count, dynamoCount, lambdaCount, runningEc2 }
         ))}
       </div>
 
+      {/* No invented totals on the money surface — per-resource breakdowns are
+          real (backend cost endpoint); a summed guess is not. */}
       <div className="mt-4 rounded-lg bg-slate-800/50 border border-slate-700/50 p-3 text-center">
-        <p className="text-xs text-slate-400 font-medium">Estimated monthly cost</p>
-        <p className="text-xl font-bold text-white mt-0.5">
-          {runningEc2 > 0 ? `~$${(runningEc2 * 3.65).toFixed(2)}` : "$0.00"}
+        <p className="text-xs text-slate-400 font-medium">Monthly cost</p>
+        <p className="text-sm text-slate-300 mt-1">
+          {totalResources === 0
+            ? "No active resources — nothing is billing."
+            : "Select a resource to see its real cost breakdown."}
         </p>
-        <p className="text-[10px] text-slate-500 mt-0.5">
-          {runningEc2 === 0 && totalResources === 0
-            ? "No active resources"
-            : runningEc2 > 0
-            ? `Public IPv4: $3.65/mo per instance. Click a resource for full breakdown.`
-            : "Click a resource for cost details"}
-        </p>
+        {runningEc2 > 0 && (
+          <p className="text-[10px] text-slate-500 mt-1">
+            Heads up: each running instance bills ~$3.65/mo for its public IPv4 alone.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -495,7 +497,7 @@ export default function DashboardPage() {
 
   return (
     <AWSGate>
-    <div className="min-h-screen bg-grid">
+    <div className="min-h-screen">
       <Navbar />
 
       <main className="mx-auto max-w-7xl px-6 pt-20 pb-12">
@@ -507,14 +509,14 @@ export default function DashboardPage() {
           className="mb-8 flex items-end justify-between"
         >
           <div>
-            <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+            <h1 className="font-display text-2xl font-bold text-white">Dashboard</h1>
             <p className="mt-1 text-sm text-slate-400">
               Real-time view of your AWS resources managed by Nimbus
             </p>
           </div>
           <Link
             href="/chat"
-            className="rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:shadow-sky-500/35 hover:brightness-110"
+            className="rounded-xl bg-gradient-to-r from-ion-500 to-ion-400 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:shadow-ion-500/35 hover:brightness-110"
           >
             + Deploy New
           </Link>
@@ -539,9 +541,9 @@ export default function DashboardPage() {
         {loading && !error && (
           <div className="flex flex-col items-center justify-center py-32">
             <div className="flex gap-1.5">
-              <span className="h-2 w-2 animate-bounce rounded-full bg-sky-400 [animation-delay:0ms]" />
-              <span className="h-2 w-2 animate-bounce rounded-full bg-sky-400 [animation-delay:150ms]" />
-              <span className="h-2 w-2 animate-bounce rounded-full bg-sky-400 [animation-delay:300ms]" />
+              <span className="h-2 w-2 animate-bounce rounded-full bg-ion-400 [animation-delay:0ms]" />
+              <span className="h-2 w-2 animate-bounce rounded-full bg-ion-400 [animation-delay:150ms]" />
+              <span className="h-2 w-2 animate-bounce rounded-full bg-ion-400 [animation-delay:300ms]" />
             </div>
             <p className="mt-4 text-sm text-slate-500">Connecting to Nimbus backend...</p>
           </div>
@@ -579,7 +581,7 @@ export default function DashboardPage() {
                 label="Auto-Stopped"
                 value={dashboard.bodyguard.instances_stopped_total}
                 icon={<svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>}
-                color="text-sky-400"
+                color="text-ion-400"
               />
             </motion.div>
 
@@ -599,7 +601,7 @@ export default function DashboardPage() {
                     </p>
                     <Link
                       href="/chat"
-                      className="mt-6 rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:brightness-110"
+                      className="mt-6 rounded-xl bg-gradient-to-r from-ion-500 to-ion-400 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:brightness-110"
                     >
                       Start Building
                     </Link>

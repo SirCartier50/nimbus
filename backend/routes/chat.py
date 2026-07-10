@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.crud import get_or_create_user
 from db.deps import get_db
+from db.engine import async_session_local
 from db.models import Deployment, Session as SessionModel
 from pipeline.orchestrator import run_turn, stream_turn
 from pipeline.state import PipelineState
@@ -254,25 +255,40 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
+# Strong references to in-flight turn tasks — asyncio only keeps weak refs, so
+# without this a client disconnect could let the GC collect a task mid-deploy.
+_turn_tasks: set = set()
+
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Same turn as /chat, but streamed as Server-Sent Events: one `progress` event per
     agent as the LangGraph graph advances (live activity feed), then a `final` event
-    carrying the full response payload."""
+    carrying the full response payload.
+
+    The turn itself (graph + persistence) runs in a background task with its OWN DB
+    session; the SSE generator merely observes it through a queue. This matters: if the
+    browser disconnects mid-deploy (tab close, refresh), Starlette cancels the response
+    generator — but real AWS resources may already be provisioning. Structured this way,
+    a disconnect kills the observer, never the turn, so the Deployment row / history /
+    ui_messages are always written, exactly like the non-streaming /chat endpoint.
+    """
     user = await get_or_create_user(db, request.state.user_id)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
     state = _build_state(user, session, req, aws_session)
 
-    async def sse():
-        # stream_turn drives the graph synchronously (blocking Bedrock/boto3 calls);
-        # run it in a worker thread and hand progress events back to this event loop
-        # via a queue so the SSE stream stays responsive.
-        queue: asyncio.Queue = asyncio.Queue()
+    clerk_user_id = request.state.user_id
+    session_id = str(session.id)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def run_and_finalize():
         loop = asyncio.get_running_loop()
         holder: dict = {}
 
         def produce():
+            # stream_turn drives the graph synchronously (blocking Bedrock/boto3
+            # calls); progress events hop back to the event loop via the queue.
             try:
                 for event in stream_turn(state):
                     if event["type"] == "final":
@@ -285,23 +301,40 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
                 holder["error"] = str(e)
             except Exception:  # surface agent/graph failures instead of hanging the stream
                 holder["error"] = "Something went wrong processing your request. Please try again."
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)  # done sentinel
 
-        loop.run_in_executor(None, produce)
+        try:
+            await asyncio.to_thread(produce)
 
+            if "error" in holder:
+                queue.put_nowait(
+                    {"type": "error", "message": f"Sorry, something went wrong: {holder['error']}"}
+                )
+                return
+
+            # Fresh DB session: the request-scoped one is torn down with the HTTP
+            # response, which may already be gone if the client disconnected.
+            async with async_session_local() as bg_db:
+                bg_user = await get_or_create_user(bg_db, clerk_user_id)
+                bg_session = await _get_owned_session(bg_db, bg_user.id, session_id)
+                payload = await _finalize_turn(bg_db, bg_user, bg_session, holder["state"])
+            queue.put_nowait({"type": "final", **payload})
+        except Exception:
+            queue.put_nowait(
+                {"type": "error", "message": "Sorry, something went wrong saving your turn. Please try again."}
+            )
+        finally:
+            queue.put_nowait(None)  # done sentinel
+
+    task = asyncio.create_task(run_and_finalize())
+    _turn_tasks.add(task)
+    task.add_done_callback(_turn_tasks.discard)
+
+    async def sse():
         while True:
             event = await queue.get()
             if event is None:
                 break
             yield _sse(event)
-
-        if "error" in holder:
-            yield _sse({"type": "error", "message": f"Sorry, something went wrong: {holder['error']}"})
-            return
-
-        payload = await _finalize_turn(db, user, session, holder["state"])
-        yield _sse({"type": "final", **payload})
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 

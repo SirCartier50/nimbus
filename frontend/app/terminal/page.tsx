@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -51,8 +51,8 @@ function formatTime(iso: string) {
 
 function sourceColor(source: string) {
   switch (source) {
-    case "architect": return "text-sky-400";
-    case "executor": return "text-violet-400";
+    case "architect": return "text-ion-400";
+    case "executor": return "text-ion-400";
     case "bodyguard": return "text-emerald-400";
     default: return "text-slate-500";
   }
@@ -158,7 +158,7 @@ export default function TerminalPage() {
 
   return (
     <AWSGate>
-      <div className="flex h-screen flex-col bg-grid">
+      <div className="flex h-screen flex-col">
         <Navbar />
 
         <div className="flex flex-1 flex-col overflow-hidden pt-14">

@@ -1,14 +1,28 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import type { Icon } from "@phosphor-icons/react";
+import {
+  ChartLineUp,
+  Cpu,
+  Database,
+  Function as FunctionIcon,
+  Globe,
+  HardDrives,
+  SignIn,
+  Table,
+} from "@phosphor-icons/react";
 import Navbar from "../components/Navbar";
 
 // ── Service data ──────────────────────────────────────────────────────────
+// One icon family (Phosphor, regular weight) across the whole app — same set the
+// agent cards on the landing page use. No emoji: they carry no brand and render
+// differently on every OS.
 
 interface Service {
   name: string;
-  icon: string;
+  icon: Icon;
   category: string;
   short: string;
   description: string;
@@ -21,7 +35,7 @@ interface Service {
 const services: Service[] = [
   {
     name: "EC2",
-    icon: "🖥",
+    icon: Cpu,
     category: "Compute",
     short: "Virtual Servers",
     description:
@@ -37,7 +51,7 @@ const services: Service[] = [
   },
   {
     name: "S3",
-    icon: "🪣",
+    icon: HardDrives,
     category: "Storage",
     short: "Object Storage",
     description:
@@ -53,7 +67,7 @@ const services: Service[] = [
   },
   {
     name: "DynamoDB",
-    icon: "🗄",
+    icon: Table,
     category: "Database",
     short: "NoSQL Database",
     description:
@@ -69,7 +83,7 @@ const services: Service[] = [
   },
   {
     name: "Lambda",
-    icon: "λ",
+    icon: FunctionIcon,
     category: "Compute",
     short: "Serverless Functions",
     description:
@@ -85,7 +99,7 @@ const services: Service[] = [
   },
   {
     name: "CloudWatch",
-    icon: "📊",
+    icon: ChartLineUp,
     category: "Monitoring",
     short: "Metrics & Logs",
     description:
@@ -101,7 +115,7 @@ const services: Service[] = [
   },
   {
     name: "RDS",
-    icon: "🐘",
+    icon: Database,
     category: "Database",
     short: "Relational Database",
     description:
@@ -117,7 +131,7 @@ const services: Service[] = [
   },
   {
     name: "API Gateway",
-    icon: "🚪",
+    icon: SignIn,
     category: "Networking",
     short: "API Management",
     description:
@@ -133,7 +147,7 @@ const services: Service[] = [
   },
   {
     name: "CloudFront",
-    icon: "🌐",
+    icon: Globe,
     category: "Networking",
     short: "CDN",
     description:
@@ -165,18 +179,18 @@ function ServiceCard({
       whileHover={{ scale: 1.02 }}
       whileTap={{ scale: 0.98 }}
       onClick={onClick}
-      className="glass group w-full rounded-xl p-6 text-left transition-all duration-200 hover:border-sky-500/30 glow-blue-hover"
+      className="glass group w-full rounded-xl p-6 text-left transition-all duration-200 hover:border-ion-500/30 glow-blue-hover"
     >
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-800 text-xl">
-            {service.icon}
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-800 text-ion-400">
+            <service.icon size={24} weight="regular" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-base font-semibold text-white">{service.name}</h3>
               {service.nimbusSupport === "full" ? (
-                <span className="rounded-full bg-sky-500/15 border border-sky-500/25 px-2 py-0.5 text-[10px] font-medium text-sky-400">
+                <span className="rounded-full bg-ion-500/15 border border-ion-500/25 px-2 py-0.5 text-[10px] font-medium text-ion-400">
                   Supported
                 </span>
               ) : (
@@ -231,11 +245,11 @@ function ServiceModal({
         {/* Header */}
         <div className="flex items-start justify-between mb-6">
           <div className="flex items-center gap-4">
-            <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-slate-800 text-2xl">
-              {service.icon}
+            <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-slate-800 text-ion-400">
+              <service.icon size={28} weight="regular" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-white">{service.name}</h2>
+              <h2 className="font-display text-2xl font-bold text-white">{service.name}</h2>
               <p className="text-sm text-slate-400">{service.short} · {service.category}</p>
             </div>
           </div>
@@ -263,7 +277,7 @@ function ServiceModal({
           <ul className="space-y-2">
             {service.useCases.map((uc, i) => (
               <li key={i} className="flex items-start gap-2 text-sm text-slate-300">
-                <span className="mt-1 text-sky-400">›</span>
+                <span className="mt-1 text-ion-400">›</span>
                 {uc}
               </li>
             ))}
@@ -293,8 +307,8 @@ function ServiceModal({
             Nimbus Support
           </h3>
           {service.nimbusSupport === "full" ? (
-            <div className="rounded-lg bg-sky-500/5 border border-sky-500/20 p-3">
-              <p className="text-sm text-sky-300">
+            <div className="rounded-lg bg-ion-500/5 border border-ion-500/20 p-3">
+              <p className="text-sm text-ion-300">
                 Fully supported — you can deploy this service through the Nimbus chat.
                 Just describe what you need and the Architect will include it in your plan.
               </p>
@@ -324,7 +338,7 @@ export default function ServicesPage() {
       : services.filter((s) => s.category === filter);
 
   return (
-    <div className="min-h-screen bg-grid">
+    <div className="min-h-screen">
       <Navbar />
 
       <main className="mx-auto max-w-7xl px-6 pt-20 pb-12">
@@ -334,7 +348,7 @@ export default function ServicesPage() {
           transition={{ duration: 0.4 }}
           className="mb-8"
         >
-          <h1 className="text-2xl font-bold text-white">AWS Services</h1>
+          <h1 className="font-display text-2xl font-bold text-white">AWS Services</h1>
           <p className="mt-1 text-sm text-slate-400">
             Understand each service in plain English — what it does, what it costs, and when to use it
           </p>
@@ -353,7 +367,7 @@ export default function ServicesPage() {
               onClick={() => setFilter(cat)}
               className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
                 filter === cat
-                  ? "bg-sky-500/15 text-sky-300 border border-sky-500/25"
+                  ? "bg-ion-500/15 text-ion-300 border border-ion-500/25"
                   : "text-slate-400 border border-slate-700/50 hover:bg-slate-800/50 hover:text-white"
               }`}
             >
@@ -365,7 +379,7 @@ export default function ServicesPage() {
         {/* Supported count */}
         <div className="mb-6 flex items-center gap-4 text-xs text-slate-500">
           <span>
-            <span className="text-sky-400 font-medium">{services.filter((s) => s.nimbusSupport === "full").length}</span> supported
+            <span className="text-ion-400 font-medium">{services.filter((s) => s.nimbusSupport === "full").length}</span> supported
           </span>
           <span>
             <span className="text-slate-400 font-medium">{services.filter((s) => s.nimbusSupport === "coming").length}</span> coming soon
@@ -398,7 +412,7 @@ export default function ServicesPage() {
         >
           <p className="text-sm text-slate-400">
             Don&apos;t know which service to pick?{" "}
-            <a href="/chat" className="text-sky-400 hover:text-sky-300 font-medium transition">
+            <a href="/chat" className="text-ion-400 hover:text-ion-300 font-medium transition">
               Just tell the Architect what you want to build
             </a>{" "}
             and it will choose the right services for you.

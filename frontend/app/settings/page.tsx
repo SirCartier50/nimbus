@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
@@ -112,6 +112,20 @@ export default function SettingsPage() {
     }
   };
 
+  const unlinkGitHub = async () => {
+    setGithubSaving(true);
+    setGithubStatus("idle");
+    try {
+      const res = await authFetch(`${API}/settings/github`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to unlink");
+      setGithubConfig({ repo_url: "", connected: false });
+    } catch {
+      setGithubStatus("error");
+    } finally {
+      setGithubSaving(false);
+    }
+  };
+
   const saveGitHub = async () => {
     setGithubSaving(true);
     setGithubStatus("idle");
@@ -135,7 +149,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-grid">
+    <div className="min-h-screen">
       <Navbar />
 
       <main className="mx-auto max-w-3xl px-6 pt-20 pb-12">
@@ -145,7 +159,7 @@ export default function SettingsPage() {
           transition={{ duration: 0.4 }}
           className="mb-8"
         >
-          <h1 className="text-2xl font-bold text-white">Settings</h1>
+          <h1 className="font-display text-2xl font-bold text-white">Settings</h1>
           <p className="mt-1 text-sm text-slate-400">
             Connect your accounts to start deploying infrastructure
           </p>
@@ -163,7 +177,7 @@ export default function SettingsPage() {
               <img
                 src={user.imageUrl}
                 alt=""
-                className="h-12 w-12 rounded-full ring-2 ring-sky-500/30"
+                className="h-12 w-12 rounded-full ring-2 ring-ion-500/30"
               />
             )}
             <div>
@@ -184,17 +198,12 @@ export default function SettingsPage() {
           transition={{ delay: 0.075, duration: 0.4 }}
           className="glass mb-6 rounded-xl p-6"
         >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-sky-500/10 text-lg">
-                💳
-              </div>
-              <div>
-                <h2 className="text-base font-semibold text-white">Billing & Plan</h2>
-                <p className="text-xs text-slate-500">
-                  Current plan: <span className="font-medium text-slate-300">{isPro ? "Pro" : "Free"}</span>
-                </p>
-              </div>
+          <div className="flex items-center justify-between border-l-2 border-ion-500/40 pl-4">
+            <div>
+              <h2 className="text-base font-semibold text-white">Billing & Plan</h2>
+              <p className="text-xs text-slate-500">
+                Current plan: <span className="font-medium text-slate-300">{isPro ? "Pro" : "Free"}</span>
+              </p>
             </div>
             <Link
               href="/settings/billing"
@@ -212,15 +221,10 @@ export default function SettingsPage() {
           transition={{ delay: 0.1, duration: 0.4 }}
           className="glass mb-6 rounded-xl p-6"
         >
-          <div className="mb-5 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/10 text-lg">
-                🔑
-              </div>
-              <div>
-                <h2 className="text-base font-semibold text-white">AWS Account</h2>
-                <p className="text-xs text-slate-500">Required to deploy resources</p>
-              </div>
+          <div className="mb-5 flex items-center justify-between border-l-2 border-amber-500/40 pl-4">
+            <div>
+              <h2 className="text-base font-semibold text-white">AWS Account</h2>
+              <p className="text-xs text-slate-500">Required to deploy resources</p>
             </div>
             {awsConfig.connected && (
               <span className="rounded-full border border-emerald-500/25 bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-400">
@@ -247,7 +251,7 @@ export default function SettingsPage() {
                   Step 1 — Your External ID
                 </label>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 truncate rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-mono text-sky-300">
+                  <code className="flex-1 truncate rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-mono text-ion-300">
                     {awsConfig.external_id || "Loading..."}
                   </code>
                   <button
@@ -290,7 +294,7 @@ export default function SettingsPage() {
                   value={awsConfig.role_arn}
                   onChange={(e) => setAwsConfig((prev) => ({ ...prev, role_arn: e.target.value }))}
                   placeholder="arn:aws:iam::123456789012:role/NimbusAccessRole"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 font-mono"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-ion-500 focus:ring-1 focus:ring-ion-500/30 font-mono"
                 />
                 <p className="mt-1.5 text-xs text-slate-500">
                   Copy this from the stack&apos;s Outputs tab once it finishes creating.
@@ -320,7 +324,7 @@ export default function SettingsPage() {
               <button
                 onClick={saveAWS}
                 disabled={awsSaving || !awsConfig.role_arn}
-                className="w-full rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:brightness-110 disabled:opacity-40"
+                className="w-full rounded-xl bg-gradient-to-r from-ion-500 to-ion-400 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:brightness-110 disabled:opacity-40"
               >
                 {awsSaving ? "Connecting..." : "Connect AWS Account"}
               </button>
@@ -335,13 +339,11 @@ export default function SettingsPage() {
           transition={{ delay: 0.15, duration: 0.4 }}
           className="glass mb-6 rounded-xl p-6"
         >
-          <div className="mb-5 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-500/10 text-lg">
-                <svg className="h-5 w-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-                </svg>
-              </div>
+          <div className="mb-5 flex items-center justify-between border-l-2 border-slate-500/40 pl-4">
+            <div className="flex items-center gap-2.5">
+              <svg className="h-4 w-4 shrink-0 text-slate-400" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+              </svg>
               <div>
                 <h2 className="text-base font-semibold text-white">GitHub Repository</h2>
                 <p className="text-xs text-slate-500">Optional — link a repo for config file generation</p>
@@ -358,10 +360,11 @@ export default function SettingsPage() {
             <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-4">
               <p className="text-sm text-emerald-300 font-mono">{githubConfig.repo_url}</p>
               <button
-                onClick={() => setGithubConfig({ repo_url: "", connected: false })}
-                className="mt-2 text-xs text-slate-400 underline hover:text-white transition"
+                onClick={unlinkGitHub}
+                disabled={githubSaving}
+                className="mt-2 text-xs text-slate-400 underline hover:text-white transition disabled:opacity-50"
               >
-                Unlink repository
+                {githubSaving ? "Unlinking..." : "Unlink repository"}
               </button>
             </div>
           ) : (
@@ -375,7 +378,7 @@ export default function SettingsPage() {
                   value={githubConfig.repo_url}
                   onChange={(e) => setGithubConfig((prev) => ({ ...prev, repo_url: e.target.value }))}
                   placeholder="https://github.com/username/repo"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 font-mono"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-ion-500 focus:ring-1 focus:ring-ion-500/30 font-mono"
                 />
               </div>
 
@@ -409,14 +412,9 @@ export default function SettingsPage() {
           transition={{ delay: 0.2, duration: 0.4 }}
           className="glass rounded-xl p-6"
         >
-          <div className="mb-5 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10 text-lg">
-              ⚙️
-            </div>
-            <div>
-              <h2 className="text-base font-semibold text-white">Preferences</h2>
-              <p className="text-xs text-slate-500">Configure how Nimbus behaves</p>
-            </div>
+          <div className="mb-5 border-l-2 border-ion-500/40 pl-4">
+            <h2 className="text-base font-semibold text-white">Preferences</h2>
+            <p className="text-xs text-slate-500">Configure how Nimbus behaves</p>
           </div>
 
           <div className="space-y-4">
@@ -437,7 +435,7 @@ export default function SettingsPage() {
                   }}
                   className="peer sr-only"
                 />
-                <div className="peer h-6 w-11 rounded-full bg-slate-700 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-sky-500 peer-checked:after:translate-x-full peer-checked:after:bg-white" />
+                <div className="peer h-6 w-11 rounded-full bg-slate-700 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-ion-500 peer-checked:after:translate-x-full peer-checked:after:bg-white" />
               </label>
             </div>
 

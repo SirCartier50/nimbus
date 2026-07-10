@@ -10,6 +10,7 @@ load_dotenv()
 from agents.bodyguard import start_bodyguard, stop_bodyguard
 from auth import auth_middleware
 from db.engine import engine
+from ratelimit import rate_limit_middleware
 from routes.chat import router as chat_router
 from routes.dashboard import router as dashboard_router
 from routes.sessions import router as sessions_router
@@ -41,6 +42,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Middleware runs outermost-last-registered: auth (below) verifies the token first,
+# then the rate limiter (registered here, so inner) buckets by the verified user_id.
+app.middleware("http")(rate_limit_middleware)
 
 # Clerk JWT auth — protects all /api/* routes
 app.middleware("http")(auth_middleware)

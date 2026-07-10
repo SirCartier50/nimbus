@@ -1,14 +1,12 @@
 @import "tailwindcss";
 
 :root {
-  --background: #020617;
-  --foreground: #e2e8f0;
-  --nimbus-navy: #020617;
-  --nimbus-dark: #0f172a;
-  --nimbus-blue: #0ea5e9;
-  --nimbus-cyan: #22d3ee;
-  --nimbus-purple: #8b5cf6;
-  --nimbus-white: #f0f9ff;
+  --background: #05070a;
+  --foreground: #e8ecf1;
+  --nimbus-ink: #05070a;
+  --nimbus-accent: #2e9ee0;
+  --nimbus-accent-bright: #5dbbf2;
+  --nimbus-white: #edeff3;
 }
 
 @theme inline {
@@ -16,6 +14,20 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-outfit);
+
+  /* Single accent family — replaces the old sky/cyan/violet mix everywhere */
+  --color-ion-50: #eaf5fc;
+  --color-ion-100: #d2e9f8;
+  --color-ion-200: #a8d4f0;
+  --color-ion-300: #7cbee8;
+  --color-ion-400: #5dbbf2;
+  --color-ion-500: #2e9ee0;
+  --color-ion-600: #2483bd;
+  --color-ion-700: #1d6795;
+  --color-ion-800: #164c6e;
+  --color-ion-900: #0f3349;
+  --color-ion-950: #081c29;
 }
 
 body {
@@ -25,35 +37,31 @@ body {
   overflow-x: hidden;
 }
 
-/* Gradient text */
-.text-gradient {
-  background: linear-gradient(135deg, #0ea5e9, #22d3ee, #8b5cf6);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+/* Keyboard focus — every interactive element gets a visible ring. Mouse clicks
+   don't trigger :focus-visible, so this costs pointer users nothing. */
+:focus-visible {
+  outline: 2px solid var(--nimbus-accent-bright);
+  outline-offset: 2px;
 }
 
-/* Animated shimmer text */
-.text-shimmer {
-  background: linear-gradient(
-    90deg,
-    #0ea5e9 0%,
-    #22d3ee 25%,
-    #8b5cf6 50%,
-    #22d3ee 75%,
-    #0ea5e9 100%
-  );
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  animation: shimmer 3s linear infinite;
-}
-
-@keyframes shimmer {
-  to {
-    background-position: 200% center;
+/* Quality floor: honor the OS-level reduced-motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
+}
+
+/* Accent phrase — static two-tone gradient. (Deliberately NOT animated: an
+   infinite shimmer on the hero's key words reads as signage, not typography.) */
+.text-accent-gradient {
+  background: linear-gradient(110deg, var(--nimbus-accent-bright), var(--nimbus-accent) 85%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 /* Floating cloud animations */
@@ -84,36 +92,49 @@ body {
   animation: float-reverse 7s ease-in-out infinite;
 }
 
-/* Glow effects */
+/* Accent emphasis — a tight tinted shadow + inner border instead of a
+   diffuse neon outer glow (large blurred glow rings are an AI-design tell). */
 .glow-blue {
-  box-shadow: 0 0 40px rgba(14, 165, 233, 0.15), 0 0 80px rgba(14, 165, 233, 0.05);
+  box-shadow: inset 0 1px 0 rgba(237, 239, 243, 0.08), 0 8px 20px -8px rgba(46, 158, 224, 0.25);
 }
 
 .glow-blue-hover:hover {
-  box-shadow: 0 0 50px rgba(14, 165, 233, 0.25), 0 0 100px rgba(14, 165, 233, 0.1);
+  box-shadow: inset 0 1px 0 rgba(237, 239, 243, 0.1), 0 10px 24px -8px rgba(46, 158, 224, 0.35);
 }
 
-/* Glassmorphism cards */
+/* Glassmorphism cards — inner highlight added for real edge refraction instead of
+   flat backdrop-blur */
 .glass {
-  background: rgba(15, 23, 42, 0.6);
+  background: linear-gradient(180deg, rgba(32, 37, 46, 0.62), rgba(13, 16, 21, 0.62));
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(14, 165, 233, 0.1);
+  border: 1px solid rgba(237, 239, 243, 0.08);
+  /* Inner highlight for real edge refraction + a real drop shadow tinted toward
+     the accent instead of generic flat black — gives cards actual lift instead
+     of reading flush with the page behind them. */
+  box-shadow:
+    inset 0 1px 0 rgba(237, 239, 243, 0.06),
+    0 20px 40px -24px rgba(0, 0, 0, 0.5),
+    0 8px 16px -12px rgba(46, 158, 224, 0.08);
 }
 
 .glass-light {
-  background: rgba(14, 165, 233, 0.05);
+  background: rgba(46, 158, 224, 0.05);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(14, 165, 233, 0.15);
+  border: 1px solid rgba(46, 158, 224, 0.15);
 }
 
-/* Subtle grid background */
-.bg-grid {
-  background-image:
-    linear-gradient(rgba(14, 165, 233, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(14, 165, 233, 0.03) 1px, transparent 1px);
-  background-size: 60px 60px;
+/* Fixed grain overlay — keeps flat dark surfaces from banding/reading cheap */
+.bg-grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.035;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* Pulse ring for status indicators */

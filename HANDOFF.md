@@ -192,62 +192,100 @@ another tool. Agreed direction:
 ---
 
 ## Task List (lives only in the session harness — reproduced here)
+### Reconciled 2026-07-09 against `REVIEW.md` (senior-eng review + design critique that session)
 
 Priority / security (do before dev work):
 - [x] **SEC-1** Protect all backend API endpoints with auth — DONE (Clerk middleware)
-- [ ] **SEC-2** Add rate limiting to API endpoints
+- [x] **SEC-2** Add rate limiting to API endpoints — DONE (2026-07-09). Per-user
+      token buckets in `backend/ratelimit.py`, registered as middleware inside auth
+      (main.py registration order makes auth outermost, so the limiter keys on the
+      verified `user_id`). Chat routes get a tight budget (`RATE_LIMIT_CHAT_PER_MINUTE`,
+      default 10/min — each request costs LLM tokens), everything else a loose one
+      (default 120/min). 429 + Retry-After. In-process by design — move counters to
+      Redis with PROD-3 (at N workers each worker allows its own budget; acceptable
+      pre-launch). Note: unauthenticated traffic is 401'd by auth *before* the
+      limiter, so JWT verification itself is unthrottled (JWKS is cached; accepted).
+      Tests: `tests/unit/test_ratelimit.py` (10).
 - [x] **SEC-3** ~~Encrypt stored AWS credentials (Fernet)~~ **SUPERSEDED 2026-07-04** —
       no longer stores AWS credentials at all. Migrated to STS AssumeRole (see the
       "STS AssumeRole migration" section below) — `utils/crypto.py` and the Fernet
       columns are gone; nothing long-lived is stored for the user's AWS access.
 
 Development:
-- [ ] **DEV-1** Finish in-progress refactor — stabilize tool_use.py integration (mostly done; commit/verify)
-- [~] **DEV-2** Replace Amazon Nova with a free/open LLM — Phase 0 DONE (2026-06-27):
-      provider abstraction built. `utils/tool_use.py` is now a back-compat shim;
-      real code lives in `utils/llm/` (`base.py` = provider-agnostic tool loop;
-      `bedrock.py` = default Nova provider; `openai_compat.py` = Groq + OpenRouter,
-      both OpenAI-compatible, with Bedrock<->OpenAI format translation; `__init__.py`
-      = `get_provider()` factory + `run_tool_loop()` convenience). Canonical internal
-      format is Bedrock Converse shape — non-Bedrock providers translate to/from it,
-      so all 3 agents + chat.py are unchanged and still default to Bedrock. Provider
-      chosen via `LLM_PROVIDER` env (bedrock|groq|openrouter|huggingface — HuggingFace
-      ENABLED 2026-07-04 via its OpenAI-compatible Inference Providers router
-      `https://router.huggingface.co/v1`, `HF_TOKEN`+`HF_MODEL`; the tool-calling caveat
-      is met by choosing a tool-capable model, see below). `openai` added to
-      requirements. Tests: `test_openai_compat.py` (translation layer) added;
-      `test_tool_use.py` patch target moved to `utils.llm.bedrock`. Full suite green
-      (84 passed, 24 skipped). REMAINING: let the pipeline/UI pass a per-user provider
-      choice through `run_tool_loop(..., provider=...)` (the hook exists, not yet wired
-      to a user setting). See PIPELINE_PLAN.md §5.
+- [x] **DEV-1** Finish in-progress refactor — DONE (2026-07-09): the uncommitted
+      chat-UI rework + this session's changes verified (backend suite green,
+      `tsc --noEmit` clean, production build green) and committed.
+- [x] **DEV-2** Replace Amazon Nova with a free/open LLM — DONE. Provider abstraction
+      (`utils/llm/`: bedrock | groq | openrouter | huggingface, all tool-capable)
+      built 2026-06-27; HF enabled 2026-07-04. The one REMAINING item (per-user
+      provider choice wired through the UI) was closed by DEV-5's ModelSelector +
+      `ChatRequest.provider` → `PipelineState.provider` passthrough. Nothing left.
 - [x] **DEV-3** Add database — persist chat sessions, user configs, deployment history — DONE
       (models, Alembic migration applied to Supabase, chat.py/settings.py route-wired)
 - [x] **DEV-4** Expand agent tool coverage — full AWS API access — DONE (2026-06-24), see
       "DEV-4 — DONE" section below. Built as botocore-sourced per-resource tools, NOT the
       generic `create_resource(resource_type, config)` blob originally specced — user
       explicitly rejected that approach mid-session in favor of full AWS-sourced fidelity.
-- [x] **DEV-5** ~~Improve UI — chat, dashboard, terminal, editor (remove editor/terminal, add resource map)~~
-      — DONE 2026-07-05 for the chat page (editor/terminal removed, resource map
-      added, plus session switcher + model selector — see "DEV-5" section below).
-      The standalone `/dashboard` and `/terminal` pages were already built in an
-      earlier session and untouched here.
+- [x] **DEV-5** Improve UI — DONE across two passes: 2026-07-05 (session switcher,
+      model selector, resource map) and the uncommitted 2026-07-06+ rework (session
+      *sidebar* with rename + pagination replacing the right-panel layout; the
+      resource map now lives on `/dashboard` only). Committed 2026-07-09.
+- [x] **DEV-6** (NEW, was REVIEW.md ENG-1/ENG-2) Wire the real SSE stream into the
+      chat UI — DONE (2026-07-09). `chat/page.tsx` now POSTs `/api/chat/stream`,
+      renders live per-agent progress (typing indicator shows the current pipeline
+      stage; finished stages listed), and attaches the REAL trace to the reply —
+      the fabricated client-side activity log is gone. Backend `chat_stream` was
+      restructured first so the turn + `_finalize_turn` run in a background task
+      with their own DB session (`async_session_local`): a mid-deploy browser
+      disconnect can no longer lose the Deployment row/history/ui_messages. If the
+      stream dies before the final event, the client re-loads the persisted session
+      instead of re-sending (a re-send would double-deploy).
 
-Production:
-- [ ] **PROD-2** Production config — CORS, env management, deployment setup
-- [ ] **PROD-3** Add Redis — LLM prompt cache, session KV store
-- [ ] **PROD-4** Kubernetes deployment
-- [ ] **PROD-5** Error handling, input validation, security hardening
+Design/UX (from the 2026-07-09 design critique — see REVIEW.md Part 2):
+- [x] **UX-1** De-template the marketing surfaces — DONE 2026-07-09 (static gradient
+      instead of infinite shimmer everywhere incl. login/signup/404; plain section
+      headers; honest stats; provider claims consolidated + accurate; starburst
+      toned down; Phosphor icons replace emoji on Services; global focus-visible
+      ring; prefers-reduced-motion honored; suggestion chips; bigger deploy gate;
+      mobile navbar + responsive chat page). Verified with live screenshots.
+- [ ] **UX-2** Markdown rendering for assistant replies (lists/code render raw today).
+- [ ] **UX-3** Decide `/terminal`'s fate — orphaned page (not in navbar), duplicates
+      the dashboard Bodyguard panel. Recommend folding into Dashboard.
+- [ ] **UX-4** Surface hierarchy + type scale pass (every card is the same glass
+      recipe; headings too timid). Full mobile audit of authed pages.
+- [ ] **UX-5** Persist error turns to `ui_messages` (REVIEW.md ENG-6) so a reload
+      doesn't silently drop a failed turn.
+
+Production — **ordering matters** (see REVIEW.md ENG-8): PROD-3 (Redis) →
+Bodyguard extraction → PROD-4 (K8s). Do NOT write K8s manifests while Bodyguard
+is an in-process daemon and the rate limiter/role-cache are process-local: 2
+replicas = duplicate patrols + split budgets. Per earlier feedback, none of these
+start until the prototype has had a real end-to-end user test.
+- [ ] **PROD-2** Production config — env management, deployment target, CORS already env-driven
+- [ ] **PROD-3** Add Redis — rate-limit counters, assume-role cache, session KV, LLM prompt cache
+- [ ] **PROD-3.5** Extract Bodyguard into its own single-replica worker process
+- [ ] **PROD-4** Kubernetes deployment (blocked by PROD-3 + PROD-3.5)
+- [ ] **PROD-5** Error handling, input validation, security hardening pass
 - [ ] **PROD-6** Observability — Grafana + Prometheus
 - [ ] **PROD-7** Production testing — k6 load tests + integration suite
 
 Testing:
-- [ ] **TEST-1..7** Unit/integration/component tests (agent handlers, tool_use loop, plan
-      parsing, chat endpoint, dashboard/settings/workspace endpoints, bodyguard, frontend)
+- [x] **TEST-1..6** Backend unit/integration — effectively DONE and exceeded: 198
+      unit tests pass here (44 integration tests skip without a local Postgres;
+      222/222 passed against a real disposable Postgres on 2026-07-05). Covers
+      agents, orchestrator (incl. streaming), validation, cost, providers,
+      bodyguard, auth, rate limiting, endpoints.
+- [ ] **TEST-7** Frontend tests — still ZERO. Highest value first target: the chat
+      turn flow (stream parsing in `consumeStream`, plan confirm/cancel).
+      LLM-testing policy (user rule): any live-model verification uses FREE
+      providers only (Groq/OpenRouter/HF) — never frontier/Bedrock models.
 
 Future:
 - [ ] **FUTURE-1** Multi-cloud support — GCP
 - [ ] Subscription/tier system (Free pay-per-usage / Pro / Max) with rate limiting and
       5-hour reset windows + model selection — depends on DB + payment + DEV-2.
+      Backend claim checks (`require_plan`/`require_feature`) already exist; needs
+      the Clerk Dashboard plan setup + a product decision on what's gated.
 
 ---
 
@@ -686,6 +724,26 @@ check wasn't possible either. Backend is verified as thoroughly as this session
 allows (222/222 real-DB tests, clean logs, healthy containers); the actual rendered
 UI — layout, session switching, model selector, resource map live-updating — needs
 you to open `/chat` in a real browser next.
+
+## 2026-07-09 session — reviews + fixes (see REVIEW.md for the full text)
+
+Re-ran the CEO/Eng reviews as a senior-lead pass + a harsh professional design
+critique (`REVIEW.md`, new file — read it before planning UI or infra work).
+Executed the actionable findings the same session:
+- **SEC-2 rate limiting** shipped (`backend/ratelimit.py`, per-user token buckets).
+- **Real streaming wired into chat** (DEV-6): the UI's activity trace was
+  *fabricated client-side* while the tested SSE endpoint sat unused — now the UI
+  consumes `/api/chat/stream` and the backend finalizes turns in a background
+  task with its own DB session so client disconnects can't lose a deploy record.
+- **`DELETE /api/settings/github`** added — the old "Unlink" button only reset
+  React state and left the repo linked server-side.
+- **Design pass** across landing/login/signup/404/services/dashboard/chat/navbar
+  (details under UX-1 in the task list), verified with live headless-browser
+  screenshots at desktop + mobile.
+- Dashboard's invented "estimated monthly cost" (`runningEc2 * $3.65`) replaced
+  with honest copy pointing at the real per-resource breakdown.
+- Suite after all changes: **198 passed, 44 skipped** (skips = no local Postgres,
+  same as always); `tsc --noEmit` clean; production build green.
 
 ## Other unblocked tracks
 With Bodyguard multi-tenant-safe, **SEC-2** (rate limiting) and **PROD-4**

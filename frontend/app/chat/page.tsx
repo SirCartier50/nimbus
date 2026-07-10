@@ -17,6 +17,7 @@ interface Message {
   plan?: Plan;
   execution_results?: ExecResult[];
   generated_files?: Record<string, string>;
+  activityLog?: ActivityEntry[];
   timestamp: number;
 }
 
@@ -44,26 +45,40 @@ interface ExecResult {
   step?: number;
 }
 
+// The final turn payload — identical shape from /chat and /chat/stream's final event.
+interface TurnPayload {
+  session_id: string;
+  content: string;
+  awaiting_confirmation?: boolean;
+  plan?: Plan;
+  execution_results?: ExecResult[];
+  generated_files?: Record<string, string>;
+}
+
 interface ActivityEntry {
   timestamp: number;
-  agent: "architect" | "executor" | "bodyguard" | "system";
+  // A pipeline stage streamed live from the backend (requirements / architect /
+  // validate / finalize / executor / cancel), or "system" for client-side notes.
+  agent: string;
   message: string;
   type: "info" | "success" | "error" | "thinking";
 }
 
-// ── Activity Panel ────────────────────────────────────────────────────────
+// ── Activity Trace ────────────────────────────────────────────────────────
+// A small collapsible trace under an assistant reply showing what the agents
+// did to produce it. The entries are REAL: they arrive live over SSE as each
+// LangGraph node finishes (`/api/chat/stream`), not reconstructed client-side.
 
-function ActivityPanel({ entries }: { entries: ActivityEntry[] }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries]);
+function ActivityTrace({ entries }: { entries: ActivityEntry[] }) {
+  const [open, setOpen] = useState(false);
 
   const agentColor = (agent: string) => {
     switch (agent) {
-      case "architect": return "text-sky-400";
-      case "executor": return "text-violet-400";
+      case "requirements":
+      case "architect":
+      case "validate":
+      case "finalize": return "text-ion-400";
+      case "executor": return "text-amber-400";
       case "bodyguard": return "text-emerald-400";
       default: return "text-slate-500";
     }
@@ -82,191 +97,54 @@ function ActivityPanel({ entries }: { entries: ActivityEntry[] }) {
     switch (type) {
       case "success": return "text-emerald-400";
       case "error": return "text-red-400";
-      case "thinking": return "text-sky-400 animate-pulse";
+      case "thinking": return "text-ion-400";
       default: return "text-slate-500";
     }
   };
 
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
-        <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-        <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Agent Activity
-        </span>
-      </div>
+  if (entries.length === 0) return null;
 
-      <div className="flex-1 overflow-y-auto p-4 font-mono text-xs">
-        {entries.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center text-center">
-            <svg className="mb-2 h-6 w-6 text-slate-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
-            <p className="text-slate-600">Agent activity will appear here</p>
-            <p className="mt-1 text-slate-700">Send a message to start</p>
-          </div>
-        ) : (
-          <div className="space-y-1.5">
-            <AnimatePresence>
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs text-slate-500 transition hover:text-slate-300"
+      >
+        <svg
+          className={`h-3 w-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+        </svg>
+        {entries.length === 1 ? "1 step" : `${entries.length} steps`}
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-2 space-y-1.5 rounded-lg bg-slate-900/50 p-3 font-mono text-xs">
               {entries.map((entry, i) => (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className="flex gap-2 leading-relaxed"
-                >
-                  <span className={`shrink-0 ${typeColor(entry.type)}`}>
-                    {typeIcon(entry.type)}
-                  </span>
-                  <span className={`shrink-0 ${agentColor(entry.agent)}`}>
-                    [{entry.agent}]
-                  </span>
-                  <span className={entry.type === "error" ? "text-red-300" : "text-slate-300"}>
+                <div key={i} className="flex gap-2 leading-relaxed">
+                  <span className={`shrink-0 ${typeColor(entry.type)}`}>{typeIcon(entry.type)}</span>
+                  <span className={`shrink-0 ${agentColor(entry.agent)}`}>[{entry.agent}]</span>
+                  <span className={entry.type === "error" ? "text-red-300" : "text-slate-400"}>
                     {entry.message}
                   </span>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            <div ref={bottomRef} />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Resource Map ──────────────────────────────────────────────────────────
-
-interface ResourceItem {
-  id?: string;
-  name?: string;
-  state?: string;
-  error?: string;
-  [key: string]: unknown;
-}
-
-interface DashboardData {
-  ec2: ResourceItem[];
-  s3: ResourceItem[];
-  dynamodb: ResourceItem[];
-  lambda: ResourceItem[];
-  bodyguard: { running: boolean; instances_stopped_total: number; unread_alerts: unknown[] };
-}
-
-const RESOURCE_GROUPS: { key: "ec2" | "s3" | "dynamodb" | "lambda"; label: string; icon: string }[] = [
-  { key: "ec2", label: "EC2", icon: "▣" },
-  { key: "s3", label: "S3", icon: "◫" },
-  { key: "dynamodb", label: "DynamoDB", icon: "▤" },
-  { key: "lambda", label: "Lambda", icon: "ƒ" },
-];
-
-function ResourceMap() {
-  const authFetch = useAuthFetch();
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    try {
-      const res = await authFetch(`${API}/dashboard`);
-      if (res.ok) setData(await res.json());
-    } catch {
-      // keep showing the last good snapshot rather than clearing it
-    } finally {
-      setLoading(false);
-    }
-  }, [authFetch]);
-
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 8000);
-    return () => clearInterval(id);
-  }, [load]);
-
-  const stateColor = (state?: string) => {
-    switch (state) {
-      case "running":
-      case "active":
-        return "bg-emerald-400";
-      case "stopped":
-      case "stopping":
-        return "bg-amber-400";
-      default:
-        return "bg-slate-500";
-    }
-  };
-
-  const detailLine = (key: string, r: ResourceItem) => {
-    if (key === "ec2") return `${r.type ?? ""} · ${r.state}${r.public_ip ? ` · ${r.public_ip}` : ""}`;
-    if (key === "s3") return `${r.state ?? "active"}`;
-    if (key === "dynamodb") return `${(r.item_count as number) ?? 0} items · ${r.state}`;
-    if (key === "lambda") return `${r.runtime ?? ""} · ${r.memory ?? ""}MB`;
-    return "";
-  };
-
-  const groupsWithItems = RESOURCE_GROUPS.map((g) => ({
-    ...g,
-    items: (data?.[g.key] ?? []).filter((r) => !r.error),
-  }));
-  const totalResources = groupsWithItems.reduce((sum, g) => sum + g.items.length, 0);
-
-  return (
-    <div className="flex h-full flex-col border-t border-slate-800">
-      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <svg className="h-3.5 w-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
-          </svg>
-          <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Resource Map</span>
-        </div>
-        {data?.bodyguard && (
-          <span
-            className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[9px] font-medium ${
-              data.bodyguard.running
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                : "border-slate-700 bg-slate-800/50 text-slate-500"
-            }`}
-          >
-            <span className={`h-1.5 w-1.5 rounded-full ${data.bodyguard.running ? "animate-pulse bg-emerald-400" : "bg-slate-600"}`} />
-            Bodyguard
-          </span>
-        )}
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-3">
-        {loading && !data ? (
-          <div className="flex h-full items-center justify-center text-xs text-slate-600">Loading resources...</div>
-        ) : totalResources === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center text-center">
-            <svg className="mb-2 h-6 w-6 text-slate-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
-            </svg>
-            <p className="text-xs text-slate-600">No resources yet</p>
-            <p className="mt-1 text-[10px] text-slate-700">Deploy something from chat to see it here</p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {groupsWithItems.map((g) =>
-              g.items.length === 0 ? null : (
-                <div key={g.key}>
-                  <p className="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                    {g.icon} {g.label} <span className="text-slate-600">({g.items.length})</span>
-                  </p>
-                  <div className="space-y-1.5">
-                    {g.items.map((r) => (
-                      <div key={String(r.id ?? r.name)} className="rounded-lg bg-slate-800/50 p-2.5">
-                        <div className="flex items-center gap-2">
-                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${stateColor(r.state)}`} />
-                          <span className="truncate text-xs font-medium text-white">{r.name ?? r.id}</span>
-                        </div>
-                        <p className="mt-1 truncate pl-3.5 text-[10px] text-slate-500">{detailLine(g.key, r)}</p>
-                      </div>
-                    ))}
-                  </div>
                 </div>
-              )
-            )}
-          </div>
+              ))}
+            </div>
+          </motion.div>
         )}
-      </div>
+      </AnimatePresence>
     </div>
   );
 }
@@ -293,7 +171,7 @@ function PlanCard({
   };
 
   return (
-    <div className="mt-3 rounded-xl border border-sky-500/20 bg-sky-500/5 p-4">
+    <div className="mt-3 rounded-xl border border-ion-500/20 bg-ion-500/5 p-4">
       <p className="mb-3 text-sm text-slate-300">{plan.explanation}</p>
 
       <div className="space-y-2">
@@ -308,11 +186,13 @@ function PlanCard({
         ))}
       </div>
 
-      <div className="mt-3 flex items-center justify-between">
-        <p className="text-xs text-slate-500">
-          Est. cost: <span className="text-slate-300">{plan.estimated_monthly_cost}</span>
+      {/* The approval gate is where real money starts — it gets the most
+          deliberate-feeling controls on the screen, not a 12px afterthought. */}
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-ion-500/15 pt-4">
+        <p className="text-sm text-slate-400">
+          Est. cost: <span className="font-medium text-white">{plan.estimated_monthly_cost}</span>
           {plan.cost_warning && (
-            <span className="ml-2 text-amber-400">{plan.cost_warning}</span>
+            <span className="ml-2 text-xs text-amber-400">{plan.cost_warning}</span>
           )}
         </p>
 
@@ -320,15 +200,15 @@ function PlanCard({
           <div className="flex gap-2">
             <button
               onClick={onDecline}
-              className="rounded-lg border border-slate-600 px-4 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-700 active:scale-[0.97]"
+              className="rounded-lg border border-slate-600 px-5 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-700 active:scale-[0.97]"
             >
               Cancel
             </button>
             <button
               onClick={onConfirm}
-              className="rounded-lg bg-gradient-to-r from-sky-500 to-cyan-400 px-4 py-1.5 text-xs font-semibold text-white shadow-md shadow-sky-500/20 transition hover:brightness-110 active:scale-[0.97]"
+              className="rounded-lg bg-gradient-to-r from-ion-500 to-ion-400 px-6 py-2 text-sm font-semibold text-white shadow-md shadow-ion-500/20 transition hover:brightness-110 active:scale-[0.97]"
             >
-              Deploy
+              Deploy plan
             </button>
           </div>
         )}
@@ -393,17 +273,17 @@ function FilesCard({ files }: { files: Record<string, string> }) {
   };
 
   return (
-    <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
+    <div className="mt-3 rounded-xl border border-ion-500/20 bg-ion-500/5 p-4">
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <svg className="h-4 w-4 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <svg className="h-4 w-4 text-ion-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
           </svg>
-          <span className="text-xs font-semibold text-violet-300">Generated Files</span>
+          <span className="text-xs font-semibold text-ion-300">Generated Files</span>
         </div>
         <button
           onClick={downloadAll}
-          className="flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-300 transition hover:bg-violet-500/20 active:scale-[0.97]"
+          className="flex items-center gap-1 rounded-lg border border-ion-500/30 bg-ion-500/10 px-3 py-1 text-xs font-medium text-ion-300 transition hover:bg-ion-500/20 active:scale-[0.97]"
         >
           <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
@@ -419,7 +299,7 @@ function FilesCard({ files }: { files: Record<string, string> }) {
             onClick={() => download(name, content)}
             className="flex w-full items-center gap-3 rounded-lg bg-slate-800/50 p-2.5 text-left transition hover:bg-slate-800/80 active:scale-[0.98]"
           >
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-slate-700/50 font-mono text-[9px] font-bold text-violet-300">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-slate-700/50 font-mono text-[9px] font-bold text-ion-300">
               {fileIcon(name)}
             </span>
             <div className="min-w-0 flex-1">
@@ -507,10 +387,13 @@ function MessageBubble({
       transition={{ duration: 0.25, delay, ease: [0.23, 1, 0.32, 1] }}
       className="flex gap-3"
     >
-      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-cyan-400 text-[10px] font-bold text-white">
+      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-ion-500 to-ion-400 text-[10px] font-bold text-white">
         N
       </div>
-      <div className="min-w-0 flex-1 text-sm leading-relaxed text-slate-200">{body}</div>
+      <div className="min-w-0 flex-1 text-sm leading-relaxed text-slate-200">
+        {msg.activityLog && <ActivityTrace entries={msg.activityLog} />}
+        {body}
+      </div>
     </motion.div>
   );
 }
@@ -531,10 +414,14 @@ function SessionSidebar({
   currentSessionId,
   onSelectSession,
   onNewChat,
+  collapsed,
+  onToggleCollapsed,
 }: {
   currentSessionId: string | null;
   onSelectSession: (id: string) => void;
   onNewChat: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
   const authFetch = useAuthFetch();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -605,17 +492,51 @@ function SessionSidebar({
     }
   };
 
-  return (
-    <div className="flex h-full w-64 shrink-0 flex-col border-r border-slate-800 bg-slate-950/50">
-      <div className="p-3">
+  if (collapsed) {
+    return (
+      <div className="flex h-full w-14 shrink-0 flex-col items-center gap-2 bg-slate-950/30 py-3">
+        <button
+          onClick={onToggleCollapsed}
+          title="Show conversations"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-800/60 hover:text-white active:scale-[0.95]"
+        >
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+          </svg>
+        </button>
         <button
           onClick={onNewChat}
-          className="flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white active:scale-[0.98]"
+          title="New chat"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-800/60 hover:text-white active:scale-[0.95]"
+        >
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full w-64 shrink-0 flex-col bg-slate-950/30">
+      <div className="flex items-center gap-2 p-3">
+        <button
+          onClick={onNewChat}
+          className="flex flex-1 items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white active:scale-[0.98]"
         >
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
           New chat
+        </button>
+        <button
+          onClick={onToggleCollapsed}
+          title="Hide conversations"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-800/60 hover:text-white active:scale-[0.95]"
+        >
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+          </svg>
         </button>
       </div>
 
@@ -634,7 +555,7 @@ function SessionSidebar({
                 layout="position"
                 transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
                 className={`group flex items-center gap-1 rounded-lg px-2 py-2 transition-colors ${
-                  s.id === currentSessionId ? "bg-sky-500/10" : "hover:bg-slate-800/60"
+                  s.id === currentSessionId ? "bg-ion-500/10" : "hover:bg-slate-800/60"
                 }`}
               >
                 {editingId === s.id ? (
@@ -650,7 +571,7 @@ function SessionSidebar({
                       }
                       if (e.key === "Escape") setEditingId(null);
                     }}
-                    className="w-full rounded bg-slate-800 px-1.5 py-0.5 text-xs text-white outline-none ring-1 ring-sky-500/40"
+                    className="w-full rounded bg-slate-800 px-1.5 py-0.5 text-xs text-white outline-none ring-1 ring-ion-500/40"
                   />
                 ) : (
                   <>
@@ -658,7 +579,7 @@ function SessionSidebar({
                       onClick={() => onSelectSession(s.id)}
                       title={s.title}
                       className={`min-w-0 flex-1 truncate text-left text-xs active:scale-[0.98] ${
-                        s.id === currentSessionId ? "text-sky-300" : "text-slate-400 group-hover:text-white"
+                        s.id === currentSessionId ? "text-ion-300" : "text-slate-400 group-hover:text-white"
                       }`}
                     >
                       {s.title}
@@ -717,7 +638,7 @@ function ModelSelector({ value, onChange }: { value: string; onChange: (v: strin
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition-colors duration-150 hover:bg-slate-700/50 hover:text-white active:scale-[0.97]"
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
+        <span className="h-1.5 w-1.5 rounded-full bg-ion-400" />
         {current.label}
         <svg className="h-3 w-3 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
@@ -743,7 +664,7 @@ function ModelSelector({ value, onChange }: { value: string; onChange: (v: strin
                     setOpen(false);
                   }}
                   className={`block w-full px-3 py-2 text-left text-xs transition-colors duration-150 active:scale-[0.98] ${
-                    p.value === value ? "bg-sky-500/10 text-sky-300" : "text-slate-300 hover:bg-slate-800"
+                    p.value === value ? "bg-ion-500/10 text-ion-300" : "text-slate-300 hover:bg-slate-800"
                   }`}
                 >
                   {p.label}
@@ -762,9 +683,16 @@ function ModelSelector({ value, onChange }: { value: string; onChange: (v: strin
 const WELCOME_MESSAGE: Message = {
   role: "assistant",
   content:
-    "Hey! I'm Nimbus AI. Tell me what you want to build on AWS and I'll design the architecture for you.\n\nYou can say things like:\n**\"I need a REST API with a database\"**\n**\"Set up a static website with storage\"**\n**\"Create a serverless function that runs every hour\"**",
+    "Hey! I'm Nimbus. Tell me what you want to build on AWS — I'll ask a few questions, design a plan with a real cost estimate, and deploy it only after you approve.",
   timestamp: Date.now(),
 };
+
+// Clickable starters instead of a wall of bold text in the first bubble.
+const SUGGESTIONS = [
+  "A REST API with a database",
+  "A static website with file storage",
+  "A serverless function that runs every hour",
+];
 
 export default function ChatPage() {
   const authFetch = useAuthFetch();
@@ -772,9 +700,12 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [freeTierMode, setFreeTierMode] = useState(true);
   const [provider, setProvider] = useState("bedrock");
+  // Real pipeline progress for the in-flight turn, streamed from the backend —
+  // shown live next to the typing indicator, then attached to the reply's trace.
+  const [liveActivity, setLiveActivity] = useState<ActivityEntry[]>([]);
   // How many of the current `messages` were bulk-loaded (session switch) rather
   // than appended live — only that leading batch gets a staggered entrance so
   // switching sessions cascades in instead of flashing all at once, while a
@@ -818,12 +749,11 @@ export default function ChatPage() {
   const startNewChat = () => {
     setSessionId(null);
     setMessages([WELCOME_MESSAGE]);
-    setActivity([]);
     setLoadedBatchSize(0);
   };
 
-  const loadSession = async (id: string) => {
-    if (id === sessionId) return;
+  const loadSession = async (id: string, opts?: { force?: boolean }) => {
+    if (!opts?.force && id === sessionId) return;
     try {
       const res = await authFetch(`${API}/sessions/${id}`);
       if (!res.ok) {
@@ -837,37 +767,69 @@ export default function ChatPage() {
       setSessionId(data.id);
       setMessages(loaded);
       setLoadedBatchSize(loaded.length);
-      setActivity([]);
     } catch {
       // ignore — keep the current conversation on screen
     }
   };
 
-  const addActivity = (agent: ActivityEntry["agent"], message: string, type: ActivityEntry["type"] = "info") => {
-    setActivity((prev) => [...prev, { timestamp: Date.now(), agent, message, type }]);
+  // Parse one SSE frame stream from /chat/stream. Yields real per-agent progress
+  // into the trace as each LangGraph node finishes; returns the final payload.
+  const consumeStream = async (
+    stream: ReadableStream<Uint8Array>,
+    addActivity: (agent: string, message: string, type?: ActivityEntry["type"]) => void
+  ): Promise<TurnPayload | null> => {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let final: TurnPayload | null = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
+        if (!dataLine) continue;
+        let evt;
+        try {
+          evt = JSON.parse(dataLine.slice(6));
+        } catch {
+          continue;
+        }
+        if (evt.type === "progress") {
+          addActivity(evt.stage, evt.message, "thinking");
+        } else if (evt.type === "error") {
+          throw new Error(evt.message);
+        } else if (evt.type === "final") {
+          final = evt as TurnPayload;
+        }
+      }
+    }
+    return final;
   };
 
   const sendMessage = async (text: string, confirm?: boolean) => {
     if (!text.trim() && confirm === undefined) return;
     setLoading(true);
+    setLiveActivity([]);
+
+    // Trace for just this turn — filled by REAL progress events streamed from the
+    // backend as each agent finishes, then attached to the assistant message as a
+    // collapsible trail. Also mirrored into `liveActivity` so the user watches the
+    // pipeline advance while waiting.
+    const turnActivity: ActivityEntry[] = [];
+    const addActivity = (agent: string, message: string, type: ActivityEntry["type"] = "info") => {
+      turnActivity.push({ timestamp: Date.now(), agent, message, type });
+      setLiveActivity([...turnActivity]);
+    };
 
     // Add user message
     const userContent = confirm === true ? "Yes, deploy" : confirm === false ? "No, cancel" : text;
     setMessages((m) => [...m, { role: "user", content: userContent, timestamp: Date.now() }]);
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
-
-    // Activity log
-    if (confirm === true) {
-      addActivity("system", "User approved deployment plan", "info");
-      addActivity("executor", "Initializing resource provisioning...", "thinking");
-    } else if (confirm === false) {
-      addActivity("system", "User cancelled the plan", "info");
-    } else {
-      addActivity("system", `User request: "${text}"`, "info");
-      const providerLabel = PROVIDERS.find((p) => p.value === provider)?.label ?? provider;
-      addActivity("architect", `Analyzing request with ${providerLabel}...`, "thinking");
-    }
 
     try {
       const body: Record<string, unknown> = {
@@ -878,15 +840,15 @@ export default function ChatPage() {
       };
       if (confirm !== undefined) body.confirm = confirm;
 
-      const res = await authFetch(`${API}/chat`, {
+      const res = await authFetch(`${API}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
 
       if (!res.ok) {
-        // 4xx bodies carry a specific, user-actionable reason (e.g. bad input);
-        // 5xx bodies may carry internal detail we shouldn't show verbatim.
+        // 4xx bodies carry a specific, user-actionable reason (e.g. bad input,
+        // rate limit); 5xx bodies may carry internal detail we shouldn't show.
         let reason = "Something went wrong on our end. Please try again.";
         if (res.status >= 400 && res.status < 500) {
           try {
@@ -899,33 +861,29 @@ export default function ChatPage() {
         throw new Error(reason);
       }
 
-      const data = await res.json();
+      const data = res.body ? await consumeStream(res.body, addActivity) : null;
+      if (!data) {
+        // The stream was cut before the final event. The backend finishes and
+        // persists the turn regardless of our connection, so DON'T re-send (a
+        // deploy would run twice) — recover the saved result instead.
+        if (sessionId) {
+          await loadSession(sessionId, { force: true });
+          return;
+        }
+        throw new Error(
+          "The connection dropped mid-turn. Your request may still have completed — check your conversations."
+        );
+      }
       if (!sessionId) setSessionId(data.session_id);
 
-      // Update activity based on response
-      if (data.awaiting_confirmation) {
-        addActivity("architect", "Infrastructure plan generated", "success");
-        const steps = data.plan?.plan ?? [];
-        steps.forEach((s: PlanStep) => {
-          addActivity("architect", `Step ${s.step}: ${s.description}`, "info");
-        });
-        addActivity("system", "Waiting for user approval...", "info");
-      } else if (data.execution_results) {
-        data.execution_results.forEach((r: ExecResult) => {
-          if (r.success) {
-            addActivity("executor", `${r.message}`, "success");
-          } else {
-            addActivity("executor", `Failed: ${r.description} — ${r.error}`, "error");
-          }
-        });
-        addActivity("bodyguard", "Resources detected, monitoring initiated", "info");
-        if (data.generated_files) {
-          const fileCount = Object.keys(data.generated_files).length;
-          addActivity("system", `${fileCount} deployment config file(s) generated`, "success");
+      // Append the real outcomes to the trace (results are facts, not staging).
+      data.execution_results?.forEach((r) => {
+        if (r.success) {
+          addActivity("executor", `${r.message}`, "success");
+        } else {
+          addActivity("executor", `Failed: ${r.description} — ${r.error}`, "error");
         }
-      } else if (confirm === false) {
-        addActivity("architect", "Plan discarded", "info");
-      }
+      });
 
       setMessages((m) => [
         ...m,
@@ -936,6 +894,7 @@ export default function ChatPage() {
           plan: data.plan,
           execution_results: data.execution_results,
           generated_files: data.generated_files,
+          activityLog: turnActivity,
           timestamp: Date.now(),
         },
       ]);
@@ -955,27 +914,39 @@ export default function ChatPage() {
         {
           role: "assistant",
           content: displayMessage,
+          activityLog: turnActivity,
           timestamp: Date.now(),
         },
       ]);
     } finally {
       setLoading(false);
+      setLiveActivity([]);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 
   return (
     <AWSGate>
-    <div className="flex h-screen flex-col bg-grid">
+    <div className="flex h-screen flex-col">
       <Navbar />
 
       <div className="mt-14 flex flex-1 overflow-hidden">
-        <SessionSidebar currentSessionId={sessionId} onSelectSession={loadSession} onNewChat={startNewChat} />
+        {/* Session list is desktop furniture — on small screens the chat gets
+            the full width (history stays reachable after resize/rotate). */}
+        <div className="hidden h-full md:block">
+          <SessionSidebar
+            currentSessionId={sessionId}
+            onSelectSession={loadSession}
+            onNewChat={startNewChat}
+            collapsed={sidebarCollapsed}
+            onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+          />
+        </div>
 
         {/* ── Chat panel ── */}
         <div className="flex flex-1 flex-col overflow-hidden">
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-6 py-6">
+          <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
             <div className="mx-auto max-w-3xl space-y-6">
               {messages.map((msg, i) => (
                 <MessageBubble
@@ -991,13 +962,40 @@ export default function ChatPage() {
 
               {loading && (
                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
-                  <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-cyan-400 text-[10px] font-bold text-white">
+                  <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-ion-500 to-ion-400 text-[10px] font-bold text-white">
                     N
                   </div>
-                  <div className="flex items-center gap-1.5 pt-1.5">
-                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400 [animation-delay:0ms]" />
-                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400 [animation-delay:150ms]" />
-                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400 [animation-delay:300ms]" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 pt-1.5">
+                      <span className="flex gap-1.5">
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ion-400 [animation-delay:0ms]" />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ion-400 [animation-delay:150ms]" />
+                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ion-400 [animation-delay:300ms]" />
+                      </span>
+                      {/* Live pipeline stage — a real progress event from the backend,
+                          not a canned "thinking" line. */}
+                      {liveActivity.length > 0 && (
+                        <motion.span
+                          key={liveActivity[liveActivity.length - 1].message}
+                          initial={{ opacity: 0, transform: "translateY(3px)" }}
+                          animate={{ opacity: 1, transform: "translateY(0px)" }}
+                          transition={{ duration: 0.2 }}
+                          className="truncate text-xs text-slate-500"
+                        >
+                          {liveActivity[liveActivity.length - 1].message}
+                        </motion.span>
+                      )}
+                    </div>
+                    {liveActivity.length > 1 && (
+                      <div className="mt-2 space-y-1 font-mono text-xs text-slate-600">
+                        {liveActivity.slice(0, -1).map((entry, i) => (
+                          <div key={i} className="flex gap-2">
+                            <span className="text-emerald-500">✓</span>
+                            <span>{entry.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               )}
@@ -1006,13 +1004,27 @@ export default function ChatPage() {
           </div>
 
           {/* Composer */}
-          <div className="border-t border-slate-800 bg-slate-950/50 px-6 py-4">
+          <div className="px-4 pb-6 sm:px-6">
+            {/* Clickable starters — only on a fresh conversation */}
+            {messages.length <= 1 && !loading && (
+              <div className="mx-auto mb-3 flex max-w-3xl flex-wrap gap-2">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => sendMessage(s)}
+                    className="rounded-full border border-slate-700 bg-slate-800/40 px-4 py-2 text-xs text-slate-300 transition hover:border-ion-500/40 hover:text-white active:scale-[0.97]"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 sendMessage(input);
               }}
-              className="mx-auto max-w-3xl rounded-2xl border border-slate-700 bg-slate-800/50 p-2 transition focus-within:border-sky-500/50"
+              className="mx-auto max-w-3xl rounded-2xl border border-slate-700 bg-slate-800/50 p-2 transition focus-within:border-ion-500/50"
             >
               <textarea
                 ref={inputRef}
@@ -1039,7 +1051,7 @@ export default function ChatPage() {
                 <button
                   type="submit"
                   disabled={loading || !input.trim()}
-                  className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-r from-sky-500 to-cyan-400 text-white shadow-md shadow-sky-500/20 transition hover:brightness-110 active:scale-[0.93] disabled:active:scale-100 disabled:opacity-30"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-r from-ion-500 to-ion-400 text-white shadow-md shadow-ion-500/20 transition hover:brightness-110 active:scale-[0.93] disabled:active:scale-100 disabled:opacity-30"
                 >
                   <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 19.5l15-7.5-15-7.5v6l10 1.5-10 1.5v6z" />
@@ -1047,16 +1059,6 @@ export default function ChatPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-
-        {/* ── Right panel: Activity + Resource Map ── */}
-        <div className="hidden w-[420px] shrink-0 flex-col border-l border-slate-800 bg-slate-950/50 lg:flex">
-          <div className="flex h-[40%] flex-col overflow-hidden">
-            <ActivityPanel entries={activity} />
-          </div>
-          <div className="flex h-[60%] flex-col overflow-hidden">
-            <ResourceMap />
           </div>
         </div>
       </div>

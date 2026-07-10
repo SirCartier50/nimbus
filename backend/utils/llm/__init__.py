@@ -60,7 +60,9 @@ def get_provider(name: str = None):
             model=os.getenv("HF_MODEL", "deepseek-ai/DeepSeek-V3-0324"),
         )
 
-    raise ValueError(f"Unknown LLM provider '{name}'. Options: bedrock, groq, openrouter.")
+    raise ValueError(
+        f"Unknown LLM provider '{name}'. Options: bedrock, groq, openrouter, huggingface."
+    )
 
 
 def run_tool_loop(system_prompt, messages, tool_config, tool_handlers, max_iterations=15, provider=None):

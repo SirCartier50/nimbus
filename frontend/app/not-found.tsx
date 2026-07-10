@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { motion } from "framer-motion";
 import Link from "next/link";
@@ -6,10 +6,10 @@ import { NimbusIcon } from "./components/NimbusLogo";
 
 export default function NotFound() {
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center bg-grid">
+    <div className="relative flex min-h-screen flex-col items-center justify-center">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="animate-float-slow absolute -top-40 right-[15%] h-[400px] w-[400px] rounded-full bg-sky-500/[0.06] blur-3xl" />
-        <div className="animate-float absolute -bottom-32 left-[15%] h-[400px] w-[400px] rounded-full bg-violet-500/[0.04] blur-3xl" />
+        <div className="animate-float-slow absolute -top-40 right-[15%] h-[400px] w-[400px] rounded-full bg-ion-500/[0.06] blur-3xl" />
+        <div className="animate-float absolute -bottom-32 left-[15%] h-[400px] w-[400px] rounded-full bg-ion-400/[0.04] blur-3xl" />
       </div>
 
       <motion.div
@@ -22,7 +22,7 @@ export default function NotFound() {
           <NimbusIcon size={48} />
         </div>
 
-        <h1 className="text-8xl font-bold text-shimmer">404</h1>
+        <h1 className="font-display text-8xl font-bold text-accent-gradient">404</h1>
 
         <p className="mt-4 text-xl font-medium text-white">
           This resource doesn&apos;t exist
@@ -34,7 +34,7 @@ export default function NotFound() {
         <div className="mt-8 flex items-center justify-center gap-4">
           <Link
             href="/"
-            className="rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:brightness-110"
+            className="rounded-xl bg-ion-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:brightness-110 active:scale-[0.97]"
           >
             Go Home
           </Link>

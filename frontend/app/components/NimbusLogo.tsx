@@ -3,30 +3,20 @@
 export function NimbusIcon({ size = 32, className = "" }: { size?: number; className?: string }) {
   return (
     <div
-      className={`flex items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-cyan-400 shadow-lg shadow-sky-500/25 ${className}`}
+      className={`flex items-center justify-center rounded-xl bg-slate-900 shadow-lg shadow-ion-500/20 ring-1 ring-ion-500/20 ${className}`}
       style={{ width: size, height: size }}
     >
       <svg
         width={size * 0.6}
         height={size * 0.6}
-        viewBox="0 0 24 24"
+        viewBox="0 0 30 30"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
-        {/* Cloud shape */}
-        <path
-          d="M6.5 19C4.01 19 2 16.99 2 14.5C2 12.5 3.4 10.8 5.28 10.25C5.57 7.34 8.02 5 11 5C13.45 5 15.55 6.6 16.36 8.85C16.57 8.82 16.78 8.8 17 8.8C19.76 8.8 22 11.04 22 13.8C22 16.56 19.76 18.8 17 18.8L6.5 19Z"
-          fill="white"
-          fillOpacity="0.95"
-        />
-        {/* Lightning bolt accent */}
-        <path
-          d="M13 11L10.5 14.5H13L11 18"
-          stroke="rgba(14,165,233,0.8)"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        {/* Three offset bars — reads as both "N" and layered atmosphere */}
+        <rect x="4" y="8" width="22" height="5" rx="2.5" fill="#2E9EE0" />
+        <rect x="4" y="15" width="15" height="5" rx="2.5" fill="#EDEFF3" opacity="0.85" />
+        <rect x="4" y="22" width="9" height="4" rx="2" fill="#EDEFF3" opacity="0.5" />
       </svg>
     </div>
   );
