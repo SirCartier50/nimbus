@@ -1,0 +1,54 @@
+# Isolated load-test stack — NEVER points at Supabase or real LLM providers.
+#   docker compose -f loadtest/docker-compose.loadtest.yml up -d --build
+# Backend on host port 8001 so it can run beside the dev stack on 8000.
+name: nimbus-loadtest
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: nimbus
+      POSTGRES_PASSWORD: nimbus
+      POSTGRES_DB: nimbus_load
+    tmpfs:
+      - /var/lib/postgresql/data   # throwaway by design
+
+  jwks:
+    image: python:3.11-slim
+    working_dir: /srv
+    volumes:
+      - ./out:/srv:ro
+    command: python -m http.server 8080
+
+  mockllm:
+    build: ../backend
+    volumes:
+      - ./mock_llm.py:/app/mock_llm.py:ro
+    environment:
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-300}
+    command: ["uvicorn", "mock_llm:app", "--host", "0.0.0.0", "--port", "9100"]
+
+  backend:
+    build: ../backend
+    depends_on: [db, jwks, mockllm]
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nimbus:nimbus@db:5432/nimbus_load
+      CLERK_ISSUER: http://jwks:8080
+      LLM_PROVIDER: openrouter
+      OPENROUTER_API_KEY: loadtest-dummy
+      OPENROUTER_BASE_URL: http://mockllm:9100/v1
+      OPENROUTER_MODEL: mock
+      # Loadtest identities have no aws_role_arn, so no AWS calls happen; these
+      # exist only so imports of the env-cred session don't fail.
+      AWS_ACCESS_KEY_ID: loadtest-dummy
+      AWS_SECRET_ACCESS_KEY: loadtest-dummy
+      AWS_REGION: us-east-1
+      ALLOWED_ORIGINS: http://localhost:3000
+      # Capacity tests target the turn executor (MAX_CONCURRENT_TURNS), not the
+      # per-minute rate limiter — lift the limiter out of the way.
+      RATE_LIMIT_CHAT_PER_MINUTE: "1000000"
+      RATE_LIMIT_DEFAULT_PER_MINUTE: "1000000"
+      DAILY_TURN_LIMIT: "0"  # same reason — capacity, not the spend cap
+      MAX_CONCURRENT_TURNS: ${MAX_CONCURRENT_TURNS:-8}

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.crud import get_or_create_user, get_user_settings
 from db.deps import get_db
 from db.models import UserSettings
+from utils.aws_clients import get_sts_client
 from utils.aws_role import assume_role, generate_external_id
 
 router = APIRouter()
@@ -68,7 +69,7 @@ async def connect_aws_role(body: AWSRoleConnection, request: Request, db: AsyncS
 
     try:
         session = assume_role(body.role_arn, settings.aws_external_id, session_name=f"nimbus-verify-{user.id}")
-        identity = session.client("sts").get_caller_identity()
+        identity = get_sts_client(session).get_caller_identity()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Unable to assume that role: {e}")
 

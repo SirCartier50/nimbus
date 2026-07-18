@@ -3,8 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy import select
 
-from agents import bodyguard
-from db.models import User
+from db.models import BodyguardAlert, User
 from routes.dashboard import clear_dashboard_cache
 from tests.conftest import requires_db
 
@@ -12,11 +11,9 @@ pytestmark = requires_db
 
 
 @pytest.fixture(autouse=True)
-def _clean_bodyguard_state():
-    bodyguard.state.clear()
+def _clean_dashboard_cache():
     clear_dashboard_cache()
     yield
-    bodyguard.state.clear()
     clear_dashboard_cache()
 
 
@@ -81,11 +78,14 @@ async def test_dashboard_second_call_within_ttl_skips_aws_entirely(client):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_alerts_are_scoped_to_the_authenticated_user(client):
-    """Different Clerk user_ids must never see each other's bodyguard alerts —
-    this seeds state for an unrelated user and confirms it stays invisible."""
-    bodyguard._get_user_state("some-other-user-id")
-    bodyguard._alert(bodyguard._get_user_state("some-other-user-id"), "someone else's alert")
+async def test_dashboard_alerts_are_scoped_to_the_authenticated_user(client, db_session):
+    """Different users must never see each other's bodyguard alerts — this seeds
+    a DB alert for an unrelated user and confirms it stays invisible."""
+    other = User(clerk_user_id="some-other-clerk-id")
+    db_session.add(other)
+    await db_session.commit()
+    db_session.add(BodyguardAlert(user_id=other.id, message="someone else's alert", severity="warning"))
+    await db_session.commit()
 
     resp = await client.get("/api/dashboard/alerts")
     assert resp.status_code == 200
@@ -94,20 +94,21 @@ async def test_dashboard_alerts_are_scoped_to_the_authenticated_user(client):
 
 @pytest.mark.asyncio
 async def test_mark_alert_read_only_affects_calling_users_alerts(client, db_session):
-    # bodyguard keys state by the internal User.id (UUID), not the Clerk sub —
+    # Alerts are keyed by the internal User.id (UUID), not the Clerk sub —
     # trigger user creation first so we can seed the alert under the real key
     # the route will actually use.
     await client.get("/api/settings/aws")
     result = await db_session.execute(select(User))
     user = result.scalars().one()
 
-    my_state = bodyguard._get_user_state(str(user.id))
-    bodyguard._alert(my_state, "my alert")
-    alert_id = my_state["alerts"][0]["id"]
+    alert = BodyguardAlert(user_id=user.id, message="my alert", severity="warning")
+    db_session.add(alert)
+    await db_session.commit()
 
-    resp = await client.post("/api/dashboard/alerts/read", json={"alert_id": alert_id})
+    resp = await client.post("/api/dashboard/alerts/read", json={"alert_id": str(alert.id)})
     assert resp.status_code == 200
-    assert my_state["alerts"][0]["read"] is True
+    await db_session.refresh(alert)
+    assert alert.read is True
 
 
 @pytest.mark.asyncio

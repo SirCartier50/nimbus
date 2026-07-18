@@ -5,8 +5,10 @@ import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import Link from "next/link";
+import { ArrowRight } from "@phosphor-icons/react";
 import { NimbusIcon } from "./components/NimbusLogo";
 import { ArchitectIcon, BodyguardIcon, ExecutorIcon } from "./components/AgentIcons";
+import LoomBackground from "./components/LoomBackground";
 
 // ── Animation variants ────────────────────────────────────────────────────
 
@@ -50,58 +52,6 @@ const agents = [
       "Runs 24/7 in the background. Monitors resource usage, auto-stops idle instances, and tracks your spending against budget limits. No surprise bills.",
   },
 ];
-
-// ── Floating cloud blobs ──────────────────────────────────────────────────
-
-// ── Hyperdrive clouds ─────────────────────────────────────────────────────
-// Nimbus-cloud-inspired ambient visual: soft, blurred cloud wisps radiating
-// outward from a center point to the true edges of the viewport — composed
-// like a hyperdrive jump (everything streaming outward from one point), but
-// each wisp is a blurred cloud shape, not a crisp line.
-
-const WISP_COUNT = 18;
-
-const wisps = Array.from({ length: WISP_COUNT }, (_, i) => {
-  const angle = (360 / WISP_COUNT) * i;
-  // Vary length/thickness/blur/brightness so the burst reads as organic
-  // cloud wisps, not a mechanically perfect starburst.
-  const length = 60 + ((i * 37) % 35); // 60–95 vmax, reaches past the screen edge
-  const thickness = 10 + ((i * 23) % 22); // 10–32px
-  const blur = 8 + ((i * 13) % 14); // 8–22px
-  // Kept deliberately faint: this is atmosphere BEHIND the copy and the chat
-  // preview — at higher opacities the burst competes with the content it frames.
-  const bright = 0.12 + ((i * 17) % 35) / 250; // 0.12–0.26
-  return { angle, length, thickness, blur, bright };
-});
-
-function HyperdriveClouds() {
-  return (
-    <div className="pointer-events-none absolute left-1/2 top-0 h-full w-screen -translate-x-1/2 overflow-hidden">
-      <motion.div
-        className="absolute left-1/2 top-1/2 h-0 w-0"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 1.8 }}
-      >
-        {wisps.map((w, i) => (
-          <div
-            key={i}
-            className="absolute left-0 top-0 origin-left rounded-full"
-            style={{
-              width: `${w.length}vmax`,
-              height: `${w.thickness}px`,
-              transform: `rotate(${w.angle}deg)`,
-              filter: `blur(${w.blur}px)`,
-              background: `linear-gradient(to right, rgba(255,255,255,${w.bright}), rgba(93,187,242,${w.bright * 0.6}) 12%, rgba(46,158,224,0) 45%)`,
-            }}
-          />
-        ))}
-        {/* Soft core at the vanishing point — a glow, not a hot spot */}
-        <div className="absolute left-0 top-0 h-40 w-40 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/10 blur-3xl" />
-      </motion.div>
-    </div>
-  );
-}
 
 // ── Chat preview ──────────────────────────────────────────────────────────
 // A real preview of the actual chat interface (same bubble/avatar/plan-card
@@ -240,13 +190,13 @@ export default function HeroPage() {
                 phones so the wordmark doesn't wrap. */}
             <Link
               href="/login"
-              className="hidden rounded-2xl px-5 py-2 text-sm font-medium text-slate-300 transition hover:text-white sm:inline-block"
+              className="hidden rounded-full px-5 py-2 text-sm font-medium text-slate-300 transition hover:text-white sm:inline-block"
             >
               Sign In
             </Link>
             <Link
               href="/login"
-              className="rounded-2xl bg-ion-700 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
+              className="rounded-full bg-ion-700 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
             >
               Start Building
             </Link>
@@ -258,27 +208,30 @@ export default function HeroPage() {
       {/* Asymmetric split, not a centered stack: copy anchors the left, the
           chat preview is a real right-hand visual, not an add-on below the fold. */}
       <section className="relative mx-auto grid max-w-7xl grid-cols-1 gap-12 px-6 pt-24 pb-12 lg:grid-cols-2 lg:items-center lg:gap-8 lg:pt-32">
-        <HyperdriveClouds />
+        <LoomBackground />
         <div className="text-center lg:text-left">
           <motion.div
             custom={0}
             variants={fadeUp}
             initial="hidden"
             animate="visible"
-            className="mb-6 inline-flex items-center gap-2 rounded-full border border-ion-500/20 bg-ion-500/10 px-4 py-1.5 text-sm text-ion-300"
+            className="mb-8 inline-flex items-center gap-2 rounded-full border border-slate-700/80 bg-slate-900/60 px-3.5 py-1 text-xs font-medium text-slate-300"
           >
+            <span className="h-1.5 w-1.5 rounded-full bg-ion-400" aria-hidden />
             Every deploy is cost-estimated and human-approved
           </motion.div>
 
+          {/* Monochrome by design — no gradient, no accent on the type. The
+              headline carries the hero on size and weight alone; the only
+              color in the hero is the loom mesh and the primary CTA. */}
           <motion.h1
             custom={1}
             variants={fadeUp}
             initial="hidden"
             animate="visible"
-            className="font-display text-5xl font-bold leading-tight tracking-tight text-white sm:text-6xl"
+            className="font-display text-6xl font-extrabold leading-[1.02] tracking-[-0.03em] text-white sm:text-7xl"
           >
-            Deploy AWS in{" "}
-            <span className="text-accent-gradient">Plain English</span>
+            Deploy AWS in plain English.
           </motion.h1>
 
           <motion.p
@@ -301,15 +254,17 @@ export default function HeroPage() {
           >
             <Link
               href="/login"
-              className="rounded-2xl bg-ion-700 px-8 py-3.5 text-base font-semibold text-white shadow-lg shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
+              className="group inline-flex items-center gap-2 rounded-full bg-ion-700 px-7 py-3.5 text-base font-semibold text-white shadow-lg shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
             >
               Start Building
+              <ArrowRight size={18} weight="bold" className="transition-transform group-hover:translate-x-0.5" />
             </Link>
             <a
               href="#agents"
-              className="rounded-2xl border border-slate-700 px-8 py-3.5 text-base font-medium text-slate-300 transition hover:border-slate-500 hover:text-white active:scale-[0.97]"
+              className="group inline-flex items-center gap-2 rounded-full border border-slate-700 px-7 py-3.5 text-base font-medium text-slate-300 transition hover:border-slate-500 hover:text-white active:scale-[0.97]"
             >
               How It Works
+              <ArrowRight size={18} weight="bold" className="transition-transform group-hover:translate-x-0.5" />
             </a>
           </motion.div>
 
@@ -503,9 +458,6 @@ export default function HeroPage() {
             <NimbusIcon size={24} />
             <span className="text-sm text-slate-500">Nimbus AI</span>
           </div>
-          <p className="text-sm text-slate-600">
-            Works with Amazon Bedrock, Groq, OpenRouter &amp; Hugging Face
-          </p>
         </div>
       </footer>
     </div>

@@ -12,7 +12,7 @@ def test_end_turn_returns_text_immediately():
     client.converse.return_value = _converse_response("end_turn", [{"text": "done"}])
 
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
-        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {})
+        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {}, provider="bedrock")
 
     assert result["text"] == "done"
     assert client.converse.call_count == 1
@@ -31,7 +31,7 @@ def test_tool_use_invokes_handler_and_continues_loop():
 
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
         result = tool_use.run_tool_loop(
-            "sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {"my_tool": handler}
+            "sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {"my_tool": handler}, provider="bedrock"
         )
 
     handler.assert_called_once_with({"x": 1})
@@ -46,7 +46,7 @@ def test_unknown_tool_name_reports_error_without_crashing():
         _converse_response("end_turn", [{"text": "ok"}]),
     ]
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
-        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": []}], {"tools": []}, {})
+        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": []}], {"tools": []}, {}, provider="bedrock")
 
     # messages[2] is the tool-result turn sent back after the first tool_use response
     tool_result = result["messages"][2]["content"][0]["toolResult"]
@@ -66,7 +66,7 @@ def test_handler_exception_is_caught_and_reported_as_tool_error():
         raise ValueError("kaboom")
 
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
-        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": []}], {"tools": []}, {"boom": handler})
+        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": []}], {"tools": []}, {"boom": handler}, provider="bedrock")
 
     tool_result = result["messages"][2]["content"][0]["toolResult"]
     assert tool_result["status"] == "error"
@@ -82,7 +82,7 @@ def test_max_tokens_stop_reason_ends_turn_without_malformed_retry():
     client.converse.return_value = _converse_response("max_tokens", [{"text": "partial answer..."}])
 
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
-        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {})
+        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {}, provider="bedrock")
 
     assert client.converse.call_count == 1, "must not retry on a terminal non-tool_use stop reason"
     assert "partial answer" in result["text"]
@@ -94,7 +94,7 @@ def test_all_models_fail_returns_error_text_instead_of_raising():
     client.converse.side_effect = Exception("ThrottlingException")
 
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
-        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {})
+        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {}, provider="bedrock")
 
     assert "All models failed" in result["text"]
 
@@ -108,7 +108,7 @@ def test_max_iterations_reached_returns_gracefully():
 
     with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
         result = tool_use.run_tool_loop(
-            "sys", [{"role": "user", "content": []}], {"tools": []}, {"loop_tool": handler}, max_iterations=3
+            "sys", [{"role": "user", "content": []}], {"tools": []}, {"loop_tool": handler}, max_iterations=3, provider="bedrock"
         )
 
     assert client.converse.call_count == 3

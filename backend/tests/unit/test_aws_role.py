@@ -34,9 +34,7 @@ def _patched_sts(response_or_side_effect):
         sts_mock.assume_role.side_effect = response_or_side_effect
     else:
         sts_mock.assume_role.return_value = response_or_side_effect
-    session_mock = MagicMock()
-    session_mock.client.return_value = sts_mock
-    return sts_mock, patch.object(aws_role, "get_boto3_session", return_value=session_mock)
+    return sts_mock, patch.object(aws_role, "get_sts_client", return_value=sts_mock)
 
 
 def test_generate_external_id_returns_unique_values():

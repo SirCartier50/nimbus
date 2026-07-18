@@ -147,6 +147,42 @@ def finalize_node(state: PipelineState) -> dict:
     }
 
 
+def _reconcile_results(plan: dict, results: list) -> list:
+    """The executor is an LLM agent — a weak model can stop after executing only
+    some of the plan's steps while sounding finished (observed live: 1 of 3 steps
+    executed, status still 'success'). Code, not the model, is accountable for
+    completeness: any plan step beyond what the agent actually executed becomes an
+    explicit failure entry, so status/summary/UI all reflect the truth."""
+    steps = plan.get("plan", []) if isinstance(plan, dict) else []
+    missing = len(steps) - len(results)
+    if missing <= 0:
+        return results
+    reconciled = list(results)
+    for step in steps[len(results):]:
+        reconciled.append({
+            "success": False,
+            "action": step.get("action"),
+            "resource_type": step.get("resource_type"),
+            "name": step.get("description", "")[:80] or step.get("resource_type", "step"),
+            "error": "This step was never executed by the agent — the deployment is incomplete.",
+        })
+    return reconciled
+
+
+def _execution_history_note(results: list) -> str:
+    """Compact, factual record of the executed turn for the agent-visible history.
+    Without this, post-deploy turns saw a conversation frozen at 'plan proposed'
+    and re-asked the user whether they were ready to deploy."""
+    lines = []
+    for r in results:
+        label = r.get("resource_type") or r.get("action") or "step"
+        if r.get("success"):
+            lines.append(f"- {label}: created/completed successfully")
+        else:
+            lines.append(f"- {label}: FAILED — {str(r.get('error', 'unknown error'))[:120]}")
+    return "The user confirmed the plan and it was executed. Results:\n" + "\n".join(lines)
+
+
 def executor_node(state: PipelineState) -> dict:
     plan = state.pending_plan
     result = run_executor(
@@ -154,14 +190,21 @@ def executor_node(state: PipelineState) -> dict:
         aws_session=state.aws_session, provider=state.provider,
         use_cloud_control=True,   # generic breadth: any "AWS::..." type via Cloud Control
     )
-    health = run_validator(result["results"], state.aws_session)
-    summary = run_summary(plan, result["results"], health, provider=state.provider)
+    results = _reconcile_results(plan, result["results"])
+    health = run_validator(results, state.aws_session)
+    summary = run_summary(plan, results, health, provider=state.provider)
     return {
-        "execution_results": result["results"],
-        "generated_files": generate_files(plan, result["results"]) or {},
+        "execution_results": results,
+        "generated_files": generate_files(plan, results) or {},
         "plan": plan,                       # keep the executed plan for the deployment record
         "health": health,
         "display_text": summary or result["text"],
+        # Record the executed turn in the agent-visible history so follow-up
+        # turns know the deployment already happened.
+        "history": state.history + [
+            {"role": "user", "content": [{"text": "Yes — deploy the proposed plan."}]},
+            {"role": "assistant", "content": [{"text": _execution_history_note(results)}]},
+        ],
         "pending_plan": None,               # clear the gate
         "plan_is_destructive": False,
         "awaiting_confirmation": False,
@@ -174,6 +217,10 @@ def cancel_node(state: PipelineState) -> dict:
         "pending_plan": None,
         "plan_is_destructive": False,
         "display_text": "Plan cancelled. Nothing was deployed. Ask me to build something else!",
+        "history": state.history + [
+            {"role": "user", "content": [{"text": "No — do not deploy the plan."}]},
+            {"role": "assistant", "content": [{"text": "Understood — the plan was cancelled and nothing was deployed."}]},
+        ],
         "outcome": "cancelled",
     }
 

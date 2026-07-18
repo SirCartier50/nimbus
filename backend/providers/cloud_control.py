@@ -19,7 +19,7 @@ TypeNames (that's the LLM-integration step, not built yet).
 import json
 import time
 
-from utils.aws_clients import get_boto3_session
+from utils.aws_clients import make_client
 
 # Cloud Control OperationStatus values that mean the request is done.
 _TERMINAL = {"SUCCESS", "FAILED", "CANCEL_COMPLETE"}
@@ -28,7 +28,7 @@ _POLL_TIMEOUT = 300.0
 
 
 def _client(session=None):
-    return (session or get_boto3_session()).client("cloudcontrol")
+    return make_client("cloudcontrol", session)
 
 
 def _wait(client, token: str, poll_interval: float, timeout: float = _POLL_TIMEOUT):

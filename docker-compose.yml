@@ -2,12 +2,55 @@ services:
   backend:
     build:
       context: ./backend
+    # Release step: migrations run exactly once per deploy, here — the worker
+    # (same image) deliberately does not, so two containers never race DDL.
+    command: ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "8000:8000"
     env_file:
       - ./backend/.env
     environment:
       ALLOWED_ORIGINS: "http://localhost:3000"
+      REDIS_URL: "redis://redis:6379/0"
+      LOG_FORMAT: "json"
+      # The worker service owns the patrol loop — an in-API daemon here would
+      # double-patrol every account.
+      BODYGUARD_IN_API: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # Must exceed SHUTDOWN_DRAIN_SECONDS (default 55) so in-flight deploys get
+    # drained on stop instead of SIGKILLed at Docker's 10s default.
+    stop_grace_period: 60s
+
+  # Single-replica Bodyguard patrol. Never scale this above 1 — it would patrol
+  # (and potentially stop instances in) every account once per replica.
+  worker:
+    build:
+      context: ./backend
+    command: ["python", "worker.py"]
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      LOG_FORMAT: "json"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Not exposed on the host — only services on this compose network reach it.
+    # Bounded memory + LRU: everything stored is a cache or a token bucket, all
+    # reconstructible, so evicting under pressure is safe.
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   frontend:

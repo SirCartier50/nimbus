@@ -229,3 +229,56 @@ def test_confirm_without_a_pending_plan_falls_through_to_requirements():
     assert state.outcome == "conversation"
     m_req.assert_called_once()
     m_exec.assert_not_called()
+
+
+# ── Execution truthfulness + post-deploy memory (E2E-3 regressions) ─────────
+
+
+def test_unexecuted_plan_steps_become_explicit_failures():
+    """Observed live: a weak model executed 1 of 3 steps and the turn still read
+    as a full success. Reconciliation must turn every missing step into an
+    explicit failure so status/summary/UI reflect reality."""
+    plan = {"plan": [
+        {"action": "create", "resource_type": "lambda_function", "config": {}},
+        {"action": "create", "resource_type": "api_gateway", "config": {}},
+        {"action": "create", "resource_type": "iam_role", "config": {}},
+    ]}
+    exec_result = {"text": "Done!", "results": [{"success": True, "resource_id": "api-1"}]}
+    with patch("pipeline.orchestrator.run_executor", return_value=exec_result), \
+         patch("pipeline.orchestrator.generate_files", return_value={}), \
+         patch("pipeline.orchestrator.run_validator", return_value=[]), \
+         patch("pipeline.orchestrator.run_summary", return_value="All good"):
+        state = run_turn(_state(confirm=True, pending_plan=plan))
+
+    assert len(state.execution_results) == 3
+    assert state.execution_results[0]["success"] is True
+    for synthetic in state.execution_results[1:]:
+        assert synthetic["success"] is False
+        assert "never executed" in synthetic["error"]
+
+
+def test_executed_turn_is_recorded_in_history():
+    """Post-deploy amnesia regression: without a history record of the execution,
+    the next turn's agents re-asked whether the user was ready to deploy."""
+    plan = {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {}}]}
+    exec_result = {"text": "Created.", "results": [{"success": True, "resource_id": "x"}]}
+    prior = [{"role": "user", "content": [{"text": "make a bucket"}]}]
+    with patch("pipeline.orchestrator.run_executor", return_value=exec_result), \
+         patch("pipeline.orchestrator.generate_files", return_value={}), \
+         patch("pipeline.orchestrator.run_validator", return_value=[]), \
+         patch("pipeline.orchestrator.run_summary", return_value="Done"):
+        state = run_turn(_state(confirm=True, pending_plan=plan, history=prior))
+
+    assert len(state.history) == len(prior) + 2
+    assert "executed" in state.history[-1]["content"][0]["text"]
+
+
+def test_cancelled_turn_is_recorded_in_history():
+    plan = {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {}}]}
+    with patch("pipeline.orchestrator.run_executor") as m_exec:
+        state = run_turn(_state(user_message="no", confirm=False, pending_plan=plan, history=[]))
+
+    m_exec.assert_not_called()
+    assert state.outcome == "cancelled"
+    assert len(state.history) == 2
+    assert "cancelled" in state.history[-1]["content"][0]["text"]

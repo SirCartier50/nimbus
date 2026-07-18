@@ -31,4 +31,6 @@ nimbus-workspace-*
 # Playwright test artifacts
 frontend/test-results/
 frontend/playwright-report/
+frontend/playwright/.clerk/
 .gstack/
+loadtest/out/

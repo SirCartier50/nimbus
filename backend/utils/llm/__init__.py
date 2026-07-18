@@ -8,6 +8,7 @@ that's the hook the pipeline uses to honor a user's chosen model.
 """
 import os
 
+from config import MODEL_DEFAULTS
 from utils.llm.base import _text_of, run_loop
 from utils.llm.bedrock import FALLBACK_MODEL_IDS, NOVA_MODEL_ID, BedrockProvider
 
@@ -15,7 +16,11 @@ __all__ = ["run_tool_loop", "run_completion", "get_provider", "NOVA_MODEL_ID", "
 
 
 def get_provider(name: str = None):
-    name = (name or os.getenv("LLM_PROVIDER", "bedrock")).lower()
+    # Default is OpenRouter, NOT Bedrock: the bedrock default silently routed
+    # every provider-less call (Bodyguard patrols, unset LLM_PROVIDER) to Nova
+    # on the operator's AWS bill. Bedrock remains constructible here for ops/
+    # tests, but it is no longer user-selectable (not in chat.KNOWN_PROVIDERS).
+    name = (name or os.getenv("LLM_PROVIDER", "openrouter")).lower()
 
     if name == "bedrock":
         return BedrockProvider()
@@ -29,7 +34,7 @@ def get_provider(name: str = None):
         return OpenAICompatProvider(
             base_url="https://api.groq.com/openai/v1",
             api_key=key,
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            model=os.getenv("GROQ_MODEL", MODEL_DEFAULTS["groq"]),
         )
 
     if name == "openrouter":
@@ -39,9 +44,11 @@ def get_provider(name: str = None):
         if not key:
             raise ValueError("OPENROUTER_API_KEY is not set")
         return OpenAICompatProvider(
-            base_url="https://openrouter.ai/api/v1",
+            # Overridable so a load/integration harness can point this at a local
+            # OpenAI-compatible mock instead of the real (paid) endpoint.
+            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             api_key=key,
-            model=os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct"),
+            model=os.getenv("OPENROUTER_MODEL", MODEL_DEFAULTS["openrouter"]),
         )
 
     if name in ("huggingface", "hf"):
@@ -57,7 +64,7 @@ def get_provider(name: str = None):
         return OpenAICompatProvider(
             base_url="https://router.huggingface.co/v1",
             api_key=key,
-            model=os.getenv("HF_MODEL", "deepseek-ai/DeepSeek-V3-0324"),
+            model=os.getenv("HF_MODEL", MODEL_DEFAULTS["huggingface"]),
         )
 
     raise ValueError(

@@ -1,0 +1,30 @@
+# Reverse proxy + automatic HTTPS for the Nimbus API (PROD-4).
+# DOMAIN comes from the environment (docker-compose.prod.yml). Caddy provisions
+# and renews the Let's Encrypt certificate on its own — no certbot cron.
+
+{$DOMAIN} {
+	# Prometheus metrics are unauthenticated by design — keep them off the
+	# public internet. Scrape from the box itself (or lift this when a real
+	# scraper with network-level access shows up).
+	@metrics path /metrics
+	respond @metrics 403
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy backend:8000 {
+		# SSE: stream every byte as it arrives — buffering a text/event-stream
+		# defeats it entirely. -1 disables response buffering.
+		flush_interval -1
+		# Chat turns legitimately run for many minutes; don't let the proxy
+		# time them out before TURN_TIMEOUT_SECONDS does.
+		transport http {
+			read_timeout 1900s
+			write_timeout 1900s
+		}
+	}
+}

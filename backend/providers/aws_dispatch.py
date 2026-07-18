@@ -9,12 +9,12 @@ from decimal import Decimal
 import botocore
 
 from providers import aws_registry as registry
-from utils.aws_clients import get_boto3_session
+from utils.aws_clients import make_client
 
 
 def client_for(resource_type: str, session=None):
     spec = registry.get_spec(resource_type)
-    return (session or get_boto3_session()).client(spec.service)
+    return make_client(spec.service, session)
 
 
 def call(client, operation: str, **kwargs):

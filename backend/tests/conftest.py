@@ -17,6 +17,16 @@ os.environ["AWS_SECRET_ACCESS_KEY"] = "test-secret-access-key"
 os.environ["AWS_REGION"] = "us-east-1"
 os.environ["CLERK_ISSUER"] = "https://example.clerk.test"
 os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
+# The integration `client` fixture drives the real app — real middleware chain,
+# one shared TEST_USER_SUB — so the per-user rate limiter would start 429ing
+# partway through a full-suite run (the whole suite fires hundreds of requests
+# in seconds). The limiter has its own unit tests; neutralize it everywhere else.
+os.environ["RATE_LIMIT_CHAT_PER_MINUTE"] = "1000000"
+os.environ["RATE_LIMIT_DEFAULT_PER_MINUTE"] = "1000000"
+os.environ["DAILY_TURN_LIMIT"] = "0"  # budget cap has its own unit tests
+# Tests exercise the in-process fallbacks by default; Redis-backed paths have
+# their own suite (test_redis_backends.py) that opts in via REDIS_TEST_URL.
+os.environ.pop("REDIS_URL", None)
 
 import asyncpg
 import pytest

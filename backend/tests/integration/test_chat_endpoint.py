@@ -246,7 +246,7 @@ async def test_new_session_is_auto_titled_from_first_message(client, db_session)
     session = (await db_session.execute(select(SessionModel))).scalars().one()
     # collapsed whitespace, not the raw (padded) message
     assert session.title == "I need a REST API with a database"
-    assert session.model == "bedrock"  # default when no provider is chosen
+    assert session.model == "openrouter"  # default when no provider is chosen (bedrock removed)
 
 
 @pytest.mark.asyncio

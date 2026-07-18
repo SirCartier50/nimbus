@@ -8,8 +8,11 @@ WORKDIR /app
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install from the pinned lock (generated on Linux via `pip-compile`, see
+# requirements.lock.txt header) so two builds of the same commit produce the
+# same image. requirements.txt stays the human-edited range file.
+COPY requirements.lock.txt .
+RUN pip install --no-cache-dir -r requirements.lock.txt
 
 # Stage 2: Runtime — only the venv copied over, no pip or build tools
 FROM python:3.11-slim

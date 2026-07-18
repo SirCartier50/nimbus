@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -66,6 +66,58 @@ class Session(Base):
 
     user: Mapped["User"] = relationship(back_populates="sessions")
     deployments: Mapped[list["Deployment"]] = relationship(back_populates="session")
+
+
+# Bodyguard's user-facing output used to live only in process RAM, so every
+# deploy/restart silently wiped a user's alert history. These three tables are
+# the durable store; the patrol loop writes them after each cycle and the
+# dashboard routes read them directly. They are also the handoff medium for
+# extracting Bodyguard into its own worker process (the API only ever reads).
+class BodyguardAlert(Base):
+    __tablename__ = "bodyguard_alerts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    message: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False, server_default="warning")
+    read: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class BodyguardLog(Base):
+    __tablename__ = "bodyguard_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    level: Mapped[str] = mapped_column(String, nullable=False, server_default="info")
+    message: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class BodyguardStatus(Base):
+    """One row per patrolled user: cycle bookkeeping + the latest sub-resource
+    snapshot (volumes/EIPs/snapshots), which is a point-in-time view — only the
+    newest one matters, so it's a column here rather than an append-only table."""
+
+    __tablename__ = "bodyguard_status"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    last_check: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    instances_stopped: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    sub_resources: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Deployment(Base):

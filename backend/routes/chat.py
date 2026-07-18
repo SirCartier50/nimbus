@@ -1,5 +1,7 @@
 import asyncio
+import concurrent.futures
 import json
+import os
 import time
 import uuid
 from typing import Optional
@@ -10,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from budget import consume_daily_turn, seconds_until_utc_midnight
 from db.crud import get_or_create_user
 from db.deps import get_db
 from db.engine import async_session_local
@@ -21,8 +24,41 @@ from utils.user_aws import get_user_boto3_session
 router = APIRouter()
 
 # Providers a user can pick in the frontend's model selector — kept in sync with
-# utils.llm.get_provider()'s accepted names.
-KNOWN_PROVIDERS = {"bedrock", "groq", "openrouter", "huggingface"}
+# utils.llm.get_provider()'s accepted names. Bedrock is deliberately excluded:
+# it billed the operator's AWS account invisibly and is no longer offered.
+KNOWN_PROVIDERS = {"groq", "openrouter", "huggingface"}
+
+# Chat turns block a thread for their full duration (LLM + boto3 are synchronous,
+# and a deploy can run for many minutes). They get their OWN bounded executor so
+# concurrent turns can never starve the default to_thread pool that everything
+# else (dashboard resource fetches, etc.) relies on. The semaphore is the
+# admission gate: when every slot is busy, new turns get an immediate 503
+# instead of silently queueing behind multi-minute deploys.
+MAX_CONCURRENT_TURNS = int(os.getenv("MAX_CONCURRENT_TURNS", "8"))
+# Hang guard, not a UX budget — real deploys (e.g. CloudFront) legitimately take
+# 15+ minutes; this only exists so a wedged LLM/AWS call can't hold a slot forever.
+TURN_TIMEOUT_SECONDS = float(os.getenv("TURN_TIMEOUT_SECONDS", "1800"))
+
+_turn_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_TURNS, thread_name_prefix="turn"
+)
+_turn_slots = asyncio.Semaphore(MAX_CONCURRENT_TURNS)
+
+_AT_CAPACITY = "The server is handling its maximum number of deployments right now. Please retry in a moment."
+_TURN_TIMED_OUT = "The request took too long and was aborted. Please try again."
+
+
+async def _spend_turn_budget(user) -> None:
+    """One chat turn = one unit of daily budget (each fans out to an LLM). 429
+    with a reset hint when today's budget is gone — this is the backstop that
+    caps worst-case spend per user per day, above the per-minute rate limiter."""
+    allowed, _used, limit = await consume_daily_turn(str(user.id))
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"You've reached today's limit of {limit} requests. It resets at midnight UTC.",
+            headers={"Retry-After": str(seconds_until_utc_midnight())},
+        )
 
 
 class ChatRequest(BaseModel):
@@ -66,7 +102,7 @@ async def _load_session(db: AsyncSession, user, req: ChatRequest) -> SessionMode
         # rather than 404ing (also avoids leaking whether another user's id exists).
         session = SessionModel(
             user_id=user.id,
-            model=req.provider or "bedrock",
+            model=req.provider or os.getenv("LLM_PROVIDER", "openrouter"),
             title=_title_from_message(req.message) if req.message else None,
             history=[],
             ui_messages=[],
@@ -135,10 +171,19 @@ async def _finalize_turn(db: AsyncSession, user, session: SessionModel, state: P
         files = state.generated_files or {}
 
         content = state.display_text
+        if fail:
+            # Deterministic honesty, independent of the LLM summary's narrative:
+            # the model has been observed declaring success after executing only
+            # part of a plan. The user must never learn the truth from the AWS bill.
+            content += (
+                f"\n\n⚠️ **{len(fail)} of {len(results)} steps did not complete.** "
+                "Check the execution results below — the resources from failed steps do NOT exist."
+            )
         if files:
             content += f"\n\n{len(files)} config file(s) generated. Use the download button to grab them."
 
         session.generated_files = files
+        session.history = state.history
         session.pending_plan = None
         session.plan_is_destructive = False
         status = "success" if not fail else ("partial" if ok else "failed")
@@ -160,6 +205,7 @@ async def _finalize_turn(db: AsyncSession, user, session: SessionModel, state: P
 
     # --- Plan cancelled (user declined) ---
     if state.outcome == "cancelled":
+        session.history = state.history
         session.pending_plan = None
         session.plan_is_destructive = False
         payload = {
@@ -225,19 +271,28 @@ async def _finalize_turn(db: AsyncSession, user, session: SessionModel, state: P
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_or_create_user(db, request.state.user_id)
+    await _spend_turn_budget(user)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
     state = _build_state(user, session, req, aws_session)
 
-    # The agents block on Bedrock/boto3 — run the whole turn in a thread so it
-    # doesn't stall the event loop for other concurrent requests.
+    # The agents block on Bedrock/boto3 — run the whole turn in the dedicated
+    # turn executor so it doesn't stall the event loop or the default thread pool.
     #
     # This must never let an exception propagate unhandled: doing so bypasses normal
     # response formation (confirmed — the exception reaches the client as a raw
     # connection failure, not a clean HTTP response), which the browser reports as
     # a generic "Failed to fetch" with no indication anything server-side broke.
+    if _turn_slots.locked():
+        raise HTTPException(status_code=503, detail=_AT_CAPACITY, headers={"Retry-After": "30"})
     try:
-        state = await asyncio.to_thread(run_turn, state)
+        async with _turn_slots:
+            state = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(_turn_executor, run_turn, state),
+                timeout=TURN_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=_TURN_TIMED_OUT)
     except ValueError as e:
         # e.g. the user picked an LLM provider the server isn't configured for —
         # safe to show verbatim, and actionable (pick a different model).
@@ -274,9 +329,13 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
     ui_messages are always written, exactly like the non-streaming /chat endpoint.
     """
     user = await get_or_create_user(db, request.state.user_id)
+    await _spend_turn_budget(user)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
     state = _build_state(user, session, req, aws_session)
+
+    if _turn_slots.locked():
+        raise HTTPException(status_code=503, detail=_AT_CAPACITY, headers={"Retry-After": "30"})
 
     clerk_user_id = request.state.user_id
     session_id = str(session.id)
@@ -303,7 +362,15 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
                 holder["error"] = "Something went wrong processing your request. Please try again."
 
         try:
-            await asyncio.to_thread(produce)
+            try:
+                async with _turn_slots:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(_turn_executor, produce),
+                        timeout=TURN_TIMEOUT_SECONDS,
+                    )
+            except asyncio.TimeoutError:
+                holder["error"] = _TURN_TIMED_OUT
+                holder.pop("state", None)
 
             if "error" in holder:
                 queue.put_nowait(
@@ -331,12 +398,29 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
 
     async def sse():
         while True:
-            event = await queue.get()
+            # Heartbeat comments while the graph is quiet (a single agent stage can
+            # run for minutes with no progress event) — without them, proxies and
+            # load balancers with idle timeouts kill the connection mid-deploy.
+            # SSE comment lines (leading ":") are ignored by the client parser.
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+                continue
             if event is None:
                 break
             yield _sse(event)
 
-    return StreamingResponse(sse(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Tell nginx-family proxies not to buffer the stream — buffered SSE
+            # arrives all at once at the end, which defeats the entire feature.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/files/{session_id}")

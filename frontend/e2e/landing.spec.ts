@@ -6,9 +6,11 @@ test.describe("Landing page", () => {
     await expect(page.getByText("Nimbus AI").first()).toBeVisible();
   });
 
-  test("signed-out visitor sees a Get Started CTA pointing at /login", async ({ page }) => {
+  test("signed-out visitor sees a Start Building CTA pointing at /login", async ({ page }) => {
     await page.goto("/");
-    const cta = page.getByRole("link", { name: "Get Started" }).first();
+    // Copy is "Start Building", not "Get Started" — verified against the actual
+    // hero/nav buttons in app/page.tsx.
+    const cta = page.getByRole("link", { name: "Start Building" }).first();
     await expect(cta).toBeVisible();
     await expect(cta).toHaveAttribute("href", "/login");
   });

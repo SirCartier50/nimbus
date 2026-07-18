@@ -1,12 +1,14 @@
 import asyncio
 import logging
-import time
+import uuid
 from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import delete, select
 
 from db.crud import list_users_with_aws_credentials
 from db.engine import async_session_local
+from db.models import BodyguardAlert, BodyguardLog, BodyguardStatus, Deployment
 from utils.aws_clients import get_cloudwatch_client, get_ec2_client, get_sts_client
-from utils.tool_use import run_tool_loop
 from utils.user_aws import get_user_boto3_session
 
 logger = logging.getLogger("bodyguard")
@@ -16,18 +18,21 @@ IPV4_COST_PER_HOUR = 0.005
 EBS_GP2_COST_PER_GB_MONTH = 0.10
 EBS_GP3_COST_PER_GB_MONTH = 0.08
 
-# Bodyguard patrols every user's AWS account independently, each with its own
-# decrypted boto3 session and its own isolated state slot — alerts/logs for one
-# user must never leak into another user's dashboard. `state` is keyed by
-# str(user_id); `_daemon_active` is the one piece of truly global, non-user
-# data (whether the background loop itself is running at all).
-state: dict[str, dict] = {}
+# Logs are diagnostic noise, not history — keep a week, then prune each cycle.
+LOG_RETENTION_DAYS = 7
+
+# Whether the background loop itself is running in THIS process. User-facing
+# state (alerts/logs/patrol bookkeeping) lives in Postgres, never in RAM: it
+# must survive restarts/deploys, and it's what lets the patrol move to its own
+# worker process while the API keeps serving reads.
 _daemon_active = False
 
 
-def _new_user_state() -> dict:
+def _new_patrol_buffer() -> dict:
+    """Scratch state for ONE patrol of ONE user. The sync patrol code collects
+    findings here (it can't await), and the async loop persists the buffer to
+    Postgres when the patrol returns."""
     return {
-        "last_check": None,
         "instances_stopped": 0,
         "logs": [],
         "alerts": [],
@@ -39,35 +44,23 @@ def _new_user_state() -> dict:
     }
 
 
-def _get_user_state(user_id: str) -> dict:
-    if user_id not in state:
-        state[user_id] = _new_user_state()
-    return state[user_id]
-
-
 # ---------------------------------------------------------------------------
-# State helpers — operate on one user's state slot, never the module globally
+# Buffer helpers — operate on one patrol's buffer, never shared state
 # ---------------------------------------------------------------------------
 
 
 def _log(user_state: dict, msg: str, level: str = "info"):
     entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "level": level, "message": msg}
     user_state["logs"].append(entry)
-    if len(user_state["logs"]) > 200:
-        user_state["logs"] = user_state["logs"][-100:]
     getattr(logger, level, logger.info)(msg)
 
 
 def _alert(user_state: dict, msg: str, severity: str = "warning"):
     user_state["alerts"].append({
-        "id": f"alert-{int(time.time() * 1000)}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "message": msg,
         "severity": severity,
-        "read": False,
     })
-    if len(user_state["alerts"]) > 100:
-        user_state["alerts"] = user_state["alerts"][-50:]
 
 
 # ---------------------------------------------------------------------------
@@ -226,151 +219,10 @@ def _handle_log_finding(params: dict, user_state: dict = None) -> dict:
     return {"success": True}
 
 
-def _build_handlers(session, user_state: dict) -> dict:
-    """Bind session + user_state per patrol call via closures — never globals —
-    so concurrent patrols of different users' accounts can't bleed into each other."""
-    return {
-        "list_running_instances": lambda p: _handle_list_running_instances(p, session),
-        "get_cpu_metrics": lambda p: _handle_get_cpu_metrics(p, session),
-        "check_ebs_volumes": lambda p: _handle_check_ebs_volumes(p, session, user_state),
-        "check_elastic_ips": lambda p: _handle_check_elastic_ips(p, session, user_state),
-        "check_snapshots": lambda p: _handle_check_snapshots(p, session, user_state),
-        "stop_instance": lambda p: _handle_stop_instance(p, session, user_state),
-        "create_alert": lambda p: _handle_create_alert(p, user_state),
-        "log_finding": lambda p: _handle_log_finding(p, user_state),
-    }
+IDLE_CPU_THRESHOLD = 5.0
+IDLE_MIN_DATAPOINTS = 3
+IDLE_WINDOW_MINUTES = 30
 
-
-# ---------------------------------------------------------------------------
-# Tool config for Bedrock
-# ---------------------------------------------------------------------------
-
-TOOL_CONFIG = {
-    "tools": [
-        {
-            "toolSpec": {
-                "name": "list_running_instances",
-                "description": "List all running EC2 instances with their type, IP, and whether they are free tier.",
-                "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "get_cpu_metrics",
-                "description": "Get average CPU utilization for an EC2 instance over a time window.",
-                "inputSchema": {
-                    "json": {
-                        "type": "object",
-                        "properties": {
-                            "instance_id": {"type": "string", "description": "EC2 instance ID"},
-                            "minutes": {"type": "number", "description": "Time window in minutes (default 30)"},
-                        },
-                        "required": ["instance_id"],
-                    }
-                },
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "check_ebs_volumes",
-                "description": "List all EBS volumes, find orphaned (unattached) ones and their costs.",
-                "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "check_elastic_ips",
-                "description": "List all Elastic IPs and find unassociated ones that cost money.",
-                "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "check_snapshots",
-                "description": "List all EBS snapshots and their storage costs.",
-                "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "stop_instance",
-                "description": "Stop a running EC2 instance to save costs. Only use after confirming it is idle.",
-                "inputSchema": {
-                    "json": {
-                        "type": "object",
-                        "properties": {
-                            "instance_id": {"type": "string", "description": "EC2 instance ID to stop"},
-                            "reason": {"type": "string", "description": "Why this instance is being stopped"},
-                        },
-                        "required": ["instance_id", "reason"],
-                    }
-                },
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "create_alert",
-                "description": "Create a user-visible alert about a finding or action taken.",
-                "inputSchema": {
-                    "json": {
-                        "type": "object",
-                        "properties": {
-                            "message": {"type": "string", "description": "Alert message for the user"},
-                            "severity": {"type": "string", "description": "info, warning, or critical"},
-                        },
-                        "required": ["message"],
-                    }
-                },
-            }
-        },
-        {
-            "toolSpec": {
-                "name": "log_finding",
-                "description": "Log an observation or finding from your patrol.",
-                "inputSchema": {
-                    "json": {
-                        "type": "object",
-                        "properties": {
-                            "message": {"type": "string", "description": "What you observed"},
-                            "level": {"type": "string", "description": "info, warning, or error"},
-                        },
-                        "required": ["message"],
-                    }
-                },
-            }
-        },
-    ]
-}
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
-
-BODYGUARD_PROMPT = """You are Nimbus Bodyguard, an AI security and cost-optimization agent for AWS.
-
-Your job is to patrol the user's AWS environment, find problems, and take action when needed.
-
-PATROL PROCEDURE:
-1. List all running instances
-2. For each running instance, check its CPU utilization
-3. Check for orphaned EBS volumes, unassociated Elastic IPs, and snapshots
-4. Log your findings and create alerts for anything the user should know about
-
-DECISION RULES:
-- If an instance has avg CPU below 5% for 30+ minutes AND has at least 3 data points, stop it and create an alert explaining why
-- If an instance is new (no CPU data yet), log it but do NOT stop it
-- If you find orphaned EBS volumes or unassociated Elastic IPs, create a warning alert with the cost
-- If multiple free-tier instances are running simultaneously, alert about faster free-tier burn
-- If any non-free-tier instances are running, alert about the cost
-
-SAFETY RULES:
-- NEVER terminate instances, only stop them
-- Always create an alert BEFORE stopping an instance
-- Always provide a reason when stopping an instance
-- If unsure whether to stop, create a warning alert instead and let the user decide
-- Be conservative — it is better to warn than to accidentally stop something important
-
-Be efficient with your tool calls. Start by listing instances, then only check CPU for instances that are running."""
 
 # ---------------------------------------------------------------------------
 # Background loop — one daemon task, patrolling every connected user's AWS
@@ -386,93 +238,255 @@ async def _bodyguard_loop():
             async with async_session_local() as db:
                 users = await list_users_with_aws_credentials(db)
                 for user in users:
-                    user_id = str(user.id)
-                    user_state = _get_user_state(user_id)
-                    user_state["last_check"] = datetime.now(timezone.utc).isoformat()
+                    # Bodyguard only watches ManagedBy=Nimbus resources, which
+                    # only exist once the user has deployed something — skip the
+                    # AssumeRole + 6 AWS API calls per cycle for users who
+                    # connected AWS but never deployed.
+                    has_deploy = await db.scalar(
+                        select(Deployment.id).where(Deployment.user_id == user.id).limit(1)
+                    )
+                    if has_deploy is None:
+                        continue
+
+                    buffer = _new_patrol_buffer()
                     try:
                         session = await get_user_boto3_session(db, user.id)
                         if session is None:
                             continue
-                        # Run the AI agent in a thread to avoid blocking the event loop
-                        await asyncio.to_thread(_run_patrol, session, user_state)
+                        # boto3 is synchronous — run the patrol in a thread so it
+                        # doesn't block the event loop
+                        await asyncio.to_thread(_run_patrol, session, buffer)
                     except Exception as e:
-                        _log(user_state, f"Patrol error: {e}", "error")
+                        _log(buffer, f"Patrol error: {e}", "error")
+                    await _persist_patrol(db, user.id, buffer)
+
+                await _prune_old_logs(db)
         except Exception as e:
             logger.error(f"Bodyguard loop error enumerating users: {e}")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
 
+async def _persist_patrol(db, user_id, buffer: dict) -> None:
+    """Write one patrol's findings to Postgres. Timestamps come from the buffer
+    (when the finding happened), not commit time."""
+    for entry in buffer["logs"]:
+        db.add(BodyguardLog(
+            user_id=user_id,
+            level=entry["level"],
+            message=entry["message"],
+            created_at=datetime.fromisoformat(entry["timestamp"]),
+        ))
+    for entry in buffer["alerts"]:
+        db.add(BodyguardAlert(
+            user_id=user_id,
+            message=entry["message"],
+            severity=entry["severity"],
+            created_at=datetime.fromisoformat(entry["timestamp"]),
+        ))
+
+    status = await db.get(BodyguardStatus, user_id)
+    if status is None:
+        status = BodyguardStatus(user_id=user_id, sub_resources={})
+        db.add(status)
+    status.last_check = datetime.now(timezone.utc)
+    status.instances_stopped = (status.instances_stopped or 0) + buffer["instances_stopped"]
+    status.sub_resources = buffer["sub_resources"]
+    await db.commit()
+
+
+async def _prune_old_logs(db) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOG_RETENTION_DAYS)
+    await db.execute(delete(BodyguardLog).where(BodyguardLog.created_at < cutoff))
+    await db.commit()
+
+
 def _run_patrol(session, user_state: dict):
-    """Run one patrol cycle for one user's AWS account using the AI agent."""
-    try:
-        handlers = _build_handlers(session, user_state)
-        run_tool_loop(
-            system_prompt=BODYGUARD_PROMPT,
-            messages=[{"role": "user", "content": [{"text": "Run your patrol. Check all running instances and resources."}]}],
-            tool_config=TOOL_CONFIG,
-            tool_handlers=handlers,
-            max_iterations=10,
+    """One patrol cycle for one user's AWS account. Deliberately deterministic:
+    every decision rule here (idle → stop, orphaned → alert) is a simple
+    threshold check, and the old LLM-driven patrol burned a Bedrock tool-loop
+    per user every CHECK_INTERVAL, 24/7 — real money for decisions plain code
+    makes identically. (That was the source of a surprise Bedrock bill: patrols
+    always used the env-default provider regardless of the user's chat model.)"""
+    instances = _handle_list_running_instances({}, session)["instances"]
+    _log(user_state, f"Patrol: {len(instances)} running Nimbus instance(s)")
+
+    non_free = [i for i in instances if not i["is_free_tier"]]
+    for inst in non_free:
+        _alert(
+            user_state,
+            f"Non-free-tier instance '{inst['name']}' ({inst['instance_type']}) is running and accruing charges.",
+            "warning",
         )
-    except Exception as e:
-        _log(user_state, f"AI patrol failed, running basic checks: {e}", "error")
-        _fallback_patrol(session, user_state)
+    free = [i for i in instances if i["is_free_tier"]]
+    if len(free) > 1:
+        _alert(
+            user_state,
+            f"{len(free)} free-tier instances are running simultaneously — your 750 free hours/month burn {len(free)}x faster.",
+            "warning",
+        )
 
+    for inst in instances:
+        iid = inst["instance_id"]
+        try:
+            metrics = _handle_get_cpu_metrics({"instance_id": iid, "minutes": IDLE_WINDOW_MINUTES}, session)
+        except Exception as e:
+            _log(user_state, f"CPU check failed for {iid}: {e}", "error")
+            continue
+        avg = metrics.get("avg_cpu")
+        if avg is None:
+            _log(user_state, f"{iid}: no CPU data yet (new instance) — not touching it")
+            continue
+        if avg < IDLE_CPU_THRESHOLD and metrics.get("datapoints", 0) >= IDLE_MIN_DATAPOINTS:
+            reason = (
+                f"Average CPU {avg}% over the last {IDLE_WINDOW_MINUTES} minutes "
+                f"(threshold {IDLE_CPU_THRESHOLD}%) — instance appears idle."
+            )
+            # Alert BEFORE stopping, so the user always sees why.
+            _alert(user_state, f"Stopping idle instance '{inst['name']}' ({iid}): {reason}", "critical")
+            try:
+                _handle_stop_instance({"instance_id": iid, "reason": reason}, session, user_state)
+            except Exception as e:
+                _log(user_state, f"Failed to stop {iid}: {e}", "error")
 
-def _fallback_patrol(session, user_state: dict):
-    """Basic non-AI patrol in case Bedrock is unavailable."""
     try:
-        instances = _handle_list_running_instances({}, session)
-        _log(user_state, f"Fallback patrol: {instances['count']} running instances")
-        for inst in instances.get("instances", []):
-            if not inst["is_free_tier"]:
-                _alert(
-                    user_state,
-                    f"Non-free-tier instance '{inst['name']}' ({inst['instance_type']}) is running.",
-                    "warning",
-                )
+        vols = _handle_check_ebs_volumes({}, session, user_state)
+        if vols["orphaned_count"]:
+            _alert(
+                user_state,
+                f"{vols['orphaned_count']} orphaned EBS volume(s) costing ~${vols['orphaned_monthly_cost']}/month — attached to nothing.",
+                "warning",
+            )
     except Exception as e:
-        _log(user_state, f"Fallback patrol error: {e}", "error")
+        _log(user_state, f"EBS check failed: {e}", "error")
+
+    try:
+        eips = _handle_check_elastic_ips({}, session, user_state)
+        unassociated = [e_ for e_ in eips["elastic_ips"] if not e_["attached_to"]]
+        if unassociated:
+            cost = round(sum(e_["cost_per_month"] for e_ in unassociated), 2)
+            _alert(
+                user_state,
+                f"{len(unassociated)} unassociated Elastic IP(s) costing ~${cost}/month while idle.",
+                "warning",
+            )
+    except Exception as e:
+        _log(user_state, f"Elastic IP check failed: {e}", "error")
+
+    try:
+        _handle_check_snapshots({}, session, user_state)
+    except Exception as e:
+        _log(user_state, f"Snapshot check failed: {e}", "error")
+
+
+# Strong reference to the daemon task — asyncio holds tasks weakly, so without
+# this the patrol loop could be garbage-collected mid-flight and silently die
+# (same bug class as chat.py's _turn_tasks).
+_daemon_task: asyncio.Task | None = None
 
 
 def start_bodyguard():
+    global _daemon_active, _daemon_task
+    _daemon_active = True
+    _daemon_task = asyncio.get_running_loop().create_task(_bodyguard_loop())
+
+
+async def run_forever():
+    """Entry point for the standalone worker process (worker.py): run the patrol
+    loop in the foreground until cancelled, instead of as a daemon task inside
+    the API process."""
     global _daemon_active
     _daemon_active = True
-    loop = asyncio.get_event_loop()
-    loop.create_task(_bodyguard_loop())
+    try:
+        await _bodyguard_loop()
+    finally:
+        _daemon_active = False
 
 
 def stop_bodyguard():
     global _daemon_active
     _daemon_active = False
+    if _daemon_task is not None:
+        _daemon_task.cancel()  # don't leave the loop sleeping through shutdown
     logger.info("Bodyguard agent stopped")
 
 
 # ---------------------------------------------------------------------------
-# Public status API — every call is scoped to one user's state slot
+# Public status API — async DB reads, scoped to one user. Same JSON shapes the
+# frontend always consumed; only the storage moved from RAM to Postgres.
 # ---------------------------------------------------------------------------
 
 
-def get_status(user_id: str) -> dict:
-    user_state = _get_user_state(user_id)
+def _alert_json(a: BodyguardAlert) -> dict:
     return {
-        "running": _daemon_active,
-        "last_check": user_state["last_check"],
-        "instances_stopped_total": user_state["instances_stopped"],
-        "recent_logs": user_state["logs"][-20:],
-        "unread_alerts": [a for a in user_state["alerts"] if not a["read"]],
-        "all_alerts": user_state["alerts"][-20:],
-        "sub_resources": user_state["sub_resources"],
+        "id": str(a.id),
+        "timestamp": a.created_at.isoformat() if a.created_at else None,
+        "message": a.message,
+        "severity": a.severity,
+        "read": a.read,
     }
 
 
-def get_alerts(user_id: str) -> list:
-    return _get_user_state(user_id)["alerts"]
+def _log_json(entry: BodyguardLog) -> dict:
+    return {
+        "timestamp": entry.created_at.isoformat() if entry.created_at else None,
+        "level": entry.level,
+        "message": entry.message,
+    }
 
 
-def mark_alert_read(user_id: str, alert_id: str):
-    user_state = _get_user_state(user_id)
-    for a in user_state["alerts"]:
-        if a["id"] == alert_id:
-            a["read"] = True
-            break
+async def get_status(db, user_id) -> dict:
+    status = await db.get(BodyguardStatus, user_id)
+    logs = (await db.scalars(
+        select(BodyguardLog).where(BodyguardLog.user_id == user_id)
+        .order_by(BodyguardLog.created_at.desc()).limit(20)
+    )).all()
+    alerts = (await db.scalars(
+        select(BodyguardAlert).where(BodyguardAlert.user_id == user_id)
+        .order_by(BodyguardAlert.created_at.desc()).limit(20)
+    )).all()
+    unread = (await db.scalars(
+        select(BodyguardAlert)
+        .where(BodyguardAlert.user_id == user_id, BodyguardAlert.read.is_(False))
+        .order_by(BodyguardAlert.created_at.asc()).limit(100)
+    )).all()
+
+    last_check = status.last_check if status else None
+    # "running" must stay truthful once the patrol moves to its own worker
+    # process: this API process won't host the daemon, so a fresh last_check
+    # (written by whoever IS patrolling) also counts as running.
+    recently_patrolled = bool(
+        last_check
+        and datetime.now(timezone.utc) - last_check < timedelta(seconds=2 * CHECK_INTERVAL)
+    )
+    return {
+        "running": _daemon_active or recently_patrolled,
+        "last_check": last_check.isoformat() if last_check else None,
+        "instances_stopped_total": status.instances_stopped if status else 0,
+        "recent_logs": [_log_json(e) for e in reversed(logs)],
+        "unread_alerts": [_alert_json(a) for a in unread],
+        "all_alerts": [_alert_json(a) for a in reversed(alerts)],
+        "sub_resources": (status.sub_resources if status else None)
+        or {"volumes": [], "elastic_ips": [], "snapshots": []},
+    }
+
+
+async def get_alerts(db, user_id) -> list:
+    rows = (await db.scalars(
+        select(BodyguardAlert).where(BodyguardAlert.user_id == user_id)
+        .order_by(BodyguardAlert.created_at.desc()).limit(100)
+    )).all()
+    return [_alert_json(a) for a in reversed(rows)]
+
+
+async def mark_alert_read(db, user_id, alert_id: str) -> None:
+    try:
+        aid = uuid.UUID(alert_id)
+    except (ValueError, AttributeError, TypeError):
+        return  # pre-migration "alert-<ms>" ids or garbage — nothing to mark
+    alert = (await db.scalars(
+        select(BodyguardAlert).where(BodyguardAlert.id == aid, BodyguardAlert.user_id == user_id)
+    )).first()
+    if alert is not None:
+        alert.read = True
+        await db.commit()

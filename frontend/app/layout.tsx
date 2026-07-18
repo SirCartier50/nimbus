@@ -51,6 +51,35 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           dividerText: "!text-slate-500",
           footer: "!hidden",
           internal: "!hidden",
+
+          // Generic badge — covers the "last used" sign-in method pill on /login
+          // and any other badge Clerk renders. Confirmed by hand: unstyled, it
+          // renders dark-gray text on a dark card, effectively invisible.
+          badge: "!bg-slate-700 !text-slate-200 !border !border-slate-600",
+
+          // UserButton popover header (name + email). Same invisible-text bug,
+          // confirmed by hand via a live screenshot of the open popover.
+          userPreviewMainIdentifier: "!text-white !font-medium",
+          userPreviewSecondaryIdentifier: "!text-slate-400",
+          userButtonPopoverCard: "!bg-slate-900 !border !border-slate-700",
+          userButtonPopoverActionButtonText: "!text-slate-200",
+          userButtonPopoverActionButtonIcon: "!text-slate-400",
+          userButtonPopoverFooter: "!hidden",
+
+          // <PricingTable /> (settings/billing). Same bug, confirmed by hand —
+          // title/price/features all rendered near-invisible on the dark card.
+          pricingTableCard: "!bg-slate-900 !border !border-slate-700",
+          pricingTableCardHeader: "!border-b !border-slate-800",
+          pricingTableCardTitle: "!text-white !font-semibold",
+          pricingTableCardDescription: "!text-slate-400",
+          pricingTableCardFee: "!text-white !font-bold",
+          pricingTableCardFeePeriod: "!text-slate-400",
+          pricingTableCardFeePeriodNotice: "!text-slate-500",
+          pricingTableCardFeaturesListItemTitle: "!text-slate-300",
+          pricingTableCardFeaturesListItemContent: "!text-slate-300",
+          pricingTableCardFooterNotice: "!text-slate-500",
+          pricingTableCardFooterButton:
+            "!bg-ion-700 !text-white !font-semibold hover:!brightness-110 !transition-all",
         },
       }}
     >

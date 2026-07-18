@@ -1,23 +1,29 @@
-"""Per-user API rate limiting (SEC-2).
+"""Per-user API rate limiting (SEC-2, Redis-shared since PROD-3).
 
-In-process token buckets keyed by (user_id, bucket). Runs as middleware *inside*
-the auth middleware (registered earlier in main.py, so auth — the outermost — has
-already populated request.state.user_id by the time this runs). Chat routes get a
-tight budget because each request fans out to an LLM + boto3; everything else gets
-a loose one that only exists to stop runaway loops.
+Token buckets keyed by (user_id, bucket). Runs as middleware *inside* the auth
+middleware (registered earlier in main.py, so auth — the outermost — has already
+populated request.state.user_id by the time this runs). Chat routes get a tight
+budget because each request fans out to an LLM + boto3; everything else gets a
+loose one that only exists to stop runaway loops.
 
-Deliberately process-local: at one uvicorn worker this is exact, at N workers each
-worker allows its own budget (N× the limit) — acceptable pre-launch. Move the
-counters to Redis when PROD-3 lands; the public surface (middleware + 429 body +
-Retry-After header) stays the same.
+When REDIS_URL is set the buckets live in Redis (one shared budget no matter how
+many workers/replicas serve traffic), updated atomically by a Lua script. When
+it isn't — or Redis errors mid-request — the in-process buckets below take over:
+rate limiting FAILS OPEN to per-worker budgets rather than 500ing every request
+because a cache blipped.
 """
 
+import logging
 import math
 import os
 import time
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+
+from utils.redis_client import get_async_redis
+
+logger = logging.getLogger("ratelimit")
 
 # requests per minute; env-overridable so ops can tune without a deploy
 CHAT_PER_MINUTE = int(os.getenv("RATE_LIMIT_CHAT_PER_MINUTE", "10"))
@@ -72,6 +78,59 @@ class RateLimiter:
 
 _limiter = RateLimiter()
 
+# Same refill math as TokenBucket.try_consume, executed atomically inside Redis
+# so concurrent workers can't both spend the last token. Clock comes from the
+# caller (time.time()): worker clocks are NTP-close, and a small skew only
+# shifts refill timing, never corrupts the bucket.
+_TOKEN_BUCKET_LUA = """
+local capacity = tonumber(ARGV[1])
+local refill = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local data = redis.call('HMGET', KEYS[1], 'tokens', 'last')
+local tokens = tonumber(data[1])
+local last = tonumber(data[2])
+if tokens == nil then tokens = capacity end
+if last == nil then last = now end
+tokens = math.min(capacity, tokens + math.max(0, now - last) * refill)
+local retry = 0
+if tokens >= 1 then
+  tokens = tokens - 1
+else
+  retry = (1 - tokens) / refill
+end
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'last', now)
+redis.call('EXPIRE', KEYS[1], 900)
+return tostring(retry)
+"""
+
+_redis_down_logged = False
+
+
+async def _check_shared(user_id: str, bucket_name: str, per_minute: int) -> float | None:
+    """Consume from the Redis-shared bucket. Returns retry-after seconds like
+    RateLimiter.check, or None when Redis is unconfigured/unreachable (caller
+    falls back to the in-process limiter)."""
+    global _redis_down_logged
+    redis = get_async_redis()
+    if redis is None:
+        return None
+    try:
+        retry = await redis.eval(
+            _TOKEN_BUCKET_LUA,
+            1,
+            f"nimbus:rl:{bucket_name}:{user_id}",
+            per_minute,
+            per_minute / 60.0,
+            time.time(),
+        )
+        _redis_down_logged = False
+        return float(retry)
+    except Exception as e:
+        if not _redis_down_logged:
+            logger.warning("Redis unavailable for rate limiting (%s) — falling back to in-process buckets", e)
+            _redis_down_logged = True
+        return None
+
 
 def _bucket_for(path: str) -> tuple[str, int]:
     if path.startswith("/api/chat"):
@@ -90,7 +149,9 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
 
     bucket_name, per_minute = _bucket_for(request.url.path)
-    retry_after = _limiter.check(user_id, bucket_name, per_minute)
+    retry_after = await _check_shared(user_id, bucket_name, per_minute)
+    if retry_after is None:
+        retry_after = _limiter.check(user_id, bucket_name, per_minute)
     if retry_after > 0:
         return JSONResponse(
             status_code=429,

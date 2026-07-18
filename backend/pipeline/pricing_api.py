@@ -41,10 +41,8 @@ def clear_cache() -> None:
 
 
 def _client(session):
-    if session is not None:
-        return session.client("pricing", region_name=_PRICING_ENDPOINT_REGION)
-    import boto3
-    return boto3.client("pricing", region_name=_PRICING_ENDPOINT_REGION)
+    from utils.aws_clients import make_client
+    return make_client("pricing", session, region_name=_PRICING_ENDPOINT_REGION)
 
 
 def _parse_hourly(price_list: list) -> float | None:

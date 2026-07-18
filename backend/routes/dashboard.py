@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 import time
 import uuid
 
@@ -15,20 +17,25 @@ from utils.aws_clients import (
     get_lambda_client,
     get_s3_client,
 )
+from utils.redis_client import get_async_redis
 from utils.user_aws import get_user_boto3_session
+
+logger = logging.getLogger("dashboard")
 
 router = APIRouter()
 
 # Measured live: the four resource-type lookups below are real, sequential AWS API
 # calls (S3's per-bucket get_bucket_tagging and DynamoDB's per-table describe+
 # list_tags are the worst offenders) — 3.7s end-to-end before this change. Two
-# fixes, both in-process (no Redis — this is a single-instance deployment, so a
-# shared external cache buys nothing yet):
+# fixes:
 #   1. Run all four concurrently instead of sequentially (asyncio.gather +
 #      to_thread, since boto3 is synchronous) — cuts latency to the slowest single
 #      resource type instead of the sum of all four.
 #   2. Cache the combined result briefly per user, so the frontend's 8s poll
 #      interval doesn't pay the full AWS round-trip on every single tick.
+#      The cache lives in Redis when REDIS_URL is set (shared across workers,
+#      TTL-evicted by Redis itself); otherwise in this dict, with stale entries
+#      overwritten in place per user.
 _DASHBOARD_CACHE_TTL_SECONDS = 8
 _dashboard_cache: dict[uuid.UUID, tuple[dict, float]] = {}
 
@@ -38,13 +45,38 @@ def clear_dashboard_cache() -> None:
     _dashboard_cache.clear()
 
 
+async def _cache_get(user_id: uuid.UUID) -> dict | None:
+    redis = get_async_redis()
+    if redis is not None:
+        try:
+            raw = await redis.get(f"nimbus:dash:{user_id}")
+            return json.loads(raw) if raw else None
+        except Exception as e:
+            logger.warning("Redis dashboard-cache read failed (%s) — using in-process cache", e)
+    cached = _dashboard_cache.get(user_id)
+    if cached and cached[1] > time.time():
+        return cached[0]
+    return None
+
+
+async def _cache_put(user_id: uuid.UUID, payload: dict) -> None:
+    redis = get_async_redis()
+    if redis is not None:
+        try:
+            await redis.set(f"nimbus:dash:{user_id}", json.dumps(payload), ex=_DASHBOARD_CACHE_TTL_SECONDS)
+            return
+        except Exception as e:
+            logger.warning("Redis dashboard-cache write failed (%s) — using in-process cache", e)
+    _dashboard_cache[user_id] = (payload, time.time() + _DASHBOARD_CACHE_TTL_SECONDS)
+
+
 @router.get("/dashboard")
 async def get_dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_or_create_user(db, request.state.user_id)
 
-    cached = _dashboard_cache.get(user.id)
-    if cached and cached[1] > time.time():
-        return cached[0]
+    cached = await _cache_get(user.id)
+    if cached is not None:
+        return cached
 
     aws_session = await get_user_boto3_session(db, user.id)
     ec2, s3, dynamodb, lambda_ = await asyncio.gather(
@@ -58,9 +90,9 @@ async def get_dashboard(request: Request, db: AsyncSession = Depends(get_db)):
         "s3": s3,
         "dynamodb": dynamodb,
         "lambda": lambda_,
-        "bodyguard": bodyguard_status(str(user.id)),
+        "bodyguard": await bodyguard_status(db, user.id),
     }
-    _dashboard_cache[user.id] = (payload, time.time() + _DASHBOARD_CACHE_TTL_SECONDS)
+    await _cache_put(user.id, payload)
     return payload
 
 
@@ -311,7 +343,7 @@ async def get_cost_details(
 @router.get("/dashboard/alerts")
 async def dashboard_alerts(request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_or_create_user(db, request.state.user_id)
-    return {"alerts": get_alerts(str(user.id))}
+    return {"alerts": await get_alerts(db, user.id)}
 
 
 class AlertReadBody(BaseModel):
@@ -321,11 +353,11 @@ class AlertReadBody(BaseModel):
 @router.post("/dashboard/alerts/read")
 async def read_alert(body: AlertReadBody, request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_or_create_user(db, request.state.user_id)
-    mark_alert_read(str(user.id), body.alert_id)
+    await mark_alert_read(db, user.id, body.alert_id)
     return {"ok": True}
 
 
 @router.get("/dashboard/bodyguard")
 async def bodyguard_state(request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_or_create_user(db, request.state.user_id)
-    return bodyguard_status(str(user.id))
+    return await bodyguard_status(db, user.id)

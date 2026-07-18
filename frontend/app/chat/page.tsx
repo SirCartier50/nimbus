@@ -621,10 +621,13 @@ function SessionSidebar({
 
 // ── Model Selector ───────────────────────────────────────────────────────
 
+// Bedrock is intentionally absent: it silently billed the operator's AWS
+// account (and its Nova Lite default underperformed on multi-step tool use).
+// Only capable tool-calling models belong here — small models hallucinate
+// plan execution.
 const PROVIDERS = [
-  { value: "bedrock", label: "Bedrock · Nova" },
-  { value: "groq", label: "Groq · Llama 3.3" },
-  { value: "openrouter", label: "OpenRouter · Llama 3.3" },
+  { value: "openrouter", label: "OpenRouter · Llama 3.3 70B" },
+  { value: "groq", label: "Groq · Llama 3.3 70B" },
   { value: "huggingface", label: "HuggingFace · DeepSeek V3" },
 ];
 
@@ -702,7 +705,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [freeTierMode, setFreeTierMode] = useState(true);
-  const [provider, setProvider] = useState("bedrock");
+  const [provider, setProvider] = useState("openrouter");
   // Real pipeline progress for the in-flight turn, streamed from the backend —
   // shown live next to the typing indicator, then attached to the reply's trace.
   const [liveActivity, setLiveActivity] = useState<ActivityEntry[]>([]);
@@ -723,7 +726,11 @@ export default function ChatPage() {
     const stored = localStorage.getItem("nimbus_free_tier");
     if (stored !== null) setFreeTierMode(JSON.parse(stored));
     const storedProvider = localStorage.getItem("nimbus_provider");
-    if (storedProvider) setProvider(storedProvider);
+    // Ignore values that are no longer offered (e.g. "bedrock" from before its
+    // removal) — otherwise a stale localStorage entry resurrects a dead provider.
+    if (storedProvider && PROVIDERS.some((p) => p.value === storedProvider)) {
+      setProvider(storedProvider);
+    }
 
     // Restore whichever conversation was open before a reload — otherwise every
     // refresh silently drops back to a blank "new chat", losing the visible
@@ -932,8 +939,12 @@ export default function ChatPage() {
 
       <div className="mt-14 flex flex-1 overflow-hidden">
         {/* Session list is desktop furniture — on small screens the chat gets
-            the full width (history stays reachable after resize/rotate). */}
-        <div className="hidden h-full md:block">
+            the full width (history stays reachable after resize/rotate).
+            The wrapper reserves the sidebar's full width in BOTH states so
+            toggling never reflows the centered chat column (the messages are
+            width-capped anyway, so collapsing bought no usable space — only a
+            distracting layout jump). */}
+        <div className="hidden h-full w-64 shrink-0 md:block">
           <SessionSidebar
             currentSessionId={sessionId}
             onSelectSession={loadSession}

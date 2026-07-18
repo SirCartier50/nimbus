@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Format-valid Clerk dev key (base64 of "clerk.example.com$") so `next build`
+  # can prerender without a real secret; override with a repo secret if set.
+  DUMMY_CLERK_PK: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nimbus
+          POSTGRES_PASSWORD: nimbus
+          POSTGRES_DB: nimbus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nimbus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock.txt
+      - name: Install pinned dependencies
+        run: |
+          pip install -r requirements.lock.txt
+          pip install -r requirements-dev.txt
+      - name: Run tests (unit + integration against service Postgres/Redis)
+        run: pytest -q
+        env:
+          REDIS_TEST_URL: redis://localhost:6379/0
+        # conftest.py defaults TEST_DATABASE_URL to nimbus:nimbus@localhost:5432/nimbus_test,
+        # which the service container above provides — so the integration tests that
+        # skip on dev machines actually run here. Same deal for the Redis-backed
+        # paths via REDIS_TEST_URL.
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Production build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || env.DUMMY_CLERK_PK }}
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_CLERK_SIGN_IN_URL: /login
+          NEXT_PUBLIC_CLERK_SIGN_UP_URL: /signup
+          NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL: /dashboard
+          NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL: /dashboard
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build backend
+      - name: Build frontend image
+        run: >
+          docker build frontend
+          --build-arg NEXT_PUBLIC_API_URL=http://localhost:8000
+          --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || env.DUMMY_CLERK_PK }}
+          --build-arg NEXT_PUBLIC_CLERK_SIGN_IN_URL=/login
+          --build-arg NEXT_PUBLIC_CLERK_SIGN_UP_URL=/signup
+          --build-arg NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
+          --build-arg NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
