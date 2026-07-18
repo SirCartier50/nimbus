@@ -1,73 +1,61 @@
-# CLAUDE.md — Frontend Website Rules
+# CLAUDE.md — Nimbus
 
-## Always Do First
-- **Invoke the `frontend-design` skill** before writing any frontend code, every session, no exceptions.
+Agentic AWS management app: FastAPI backend (`backend/`) + Next.js 16 App Router
+frontend (`frontend/`, TypeScript, React 19). This is a real multi-route app with
+an established component library and design system — treat frontend work as
+editing/extending it, not generating a standalone HTML page.
 
-## Reference Images
-- If a reference image is provided: match layout, spacing, typography, and color exactly. Swap in placeholder content (images via `https://placehold.co/`, generic copy). Do not improve or add to the design.
-- If no reference image: design from scratch with high craft (see guardrails below).
-- Screenshot your output, compare against reference, fix mismatches, re-screenshot. Do at least 2 comparison rounds. Stop only when no visible differences remain or user says so.
+See `DECISIONS.md` for the non-obvious decisions (and their *why*) and the work
+that's genuinely still open — it's the live cross-machine continuity doc. For
+"what shipped and how," read the code and `git log`, not a prose changelog. A
+frozen historical narrative lives at `docs/archive/HANDOFF-2026-07-18.md`.
 
-## Local Server
-- **Always serve on localhost** — never screenshot a `file:///` URL.
-- Start the dev server: `node serve.mjs` (serves the project root at `http://localhost:3000`)
-- `serve.mjs` lives in the project root. Start it in the background before taking any screenshots.
-- If the server is already running, do not start a second instance.
+## Frontend design system (already built — reuse it, don't reinvent it)
 
-## Screenshot Workflow
-- Puppeteer is installed at `C:/Users/nateh/AppData/Local/Temp/puppeteer-test/`. Chrome cache is at `C:/Users/nateh/.cache/puppeteer/`.
-- **Always screenshot from localhost:** `node screenshot.mjs http://localhost:3000`
-- Screenshots are saved automatically to `./temporary screenshots/screenshot-N.png` (auto-incremented, never overwritten).
-- Optional label suffix: `node screenshot.mjs http://localhost:3000 label` → saves as `screenshot-N-label.png`
-- `screenshot.mjs` lives in the project root. Use it as-is.
-- After screenshotting, read the PNG from `temporary screenshots/` with the Read tool — Claude can see and analyze the image directly.
-- When comparing, be specific: "heading is 32px but reference shows ~24px", "card gap is 16px but should be 24px"
-- Check: spacing/padding, font size/weight/line-height, colors (exact hex), alignment, border-radius, shadows, image sizing
+- Tokens and base styles live in `frontend/app/globals.css`: the `ion-*` accent
+  scale (`--color-ion-50`…`950`, built off `#2e9ee0`), dark base
+  (`--background: #05070a`), Geist sans/mono + Outfit display font. Use these,
+  not default Tailwind colors (indigo-500/blue-600 etc. were deliberately
+  removed from this project).
+- Established surface/effect classes: `.glass` / `.glass-light` (card
+  treatment), `.bg-grain` (SVG noise overlay), `.glow-blue` /
+  `.glow-blue-hover` (tinted shadow, not a blurred neon glow). Extend these
+  rather than hand-rolling new card/shadow recipes.
+- Tailwind v4 — config is CSS-based in `globals.css` (`@theme inline`), there is
+  no `tailwind.config.js`.
+- Already-installed UI deps: `@phosphor-icons/react` for icons, `framer-motion`
+  for animation, `@clerk/nextjs` for auth. Use these before reaching for a new
+  library.
+- Animate `transform`/`opacity` only, spring-style easing, never
+  `transition-all` — this is the project's own established rule (see
+  `LoomBackground.tsx`). `prefers-reduced-motion` is already handled globally
+  in `globals.css`; anything you animate must still degrade correctly under it.
+- `:focus-visible` gets a visible ring globally already — every new
+  interactive element needs hover/focus/active states, don't bypass the
+  existing ring.
+- Known debt, don't compound it: every card currently uses the identical flat
+  `.glass` treatment with no base/elevated/floating layering, and heading vs.
+  body type scale is timid in places (tracked as UX-4 in `DECISIONS.md`). Give
+  new surfaces real depth instead of defaulting to another flat `.glass` div.
 
-## Output Defaults
-- Single `index.html` file, all styles inline, unless user says otherwise
-- Tailwind CSS via CDN: `<script src="https://cdn.tailwindcss.com"></script>`
-- Placeholder images: `https://placehold.co/WIDTHxHEIGHT`
-- Mobile-first responsive
+## Verifying frontend changes
 
-## Brand Assets
-- Always check the `brand_assets/` folder before designing. It may contain logos, color guides, style guides, or images.
-- If assets exist there, use them. Do not use placeholders where real assets are available.
-- If a logo is present, use it. If a color palette is defined, use those exact values — do not invent brand colors.
-
-## Anti-Generic Guardrails
-- **Colors:** Never use default Tailwind palette (indigo-500, blue-600, etc.). Pick a custom brand color and derive from it.
-- **Shadows:** Never use flat `shadow-md`. Use layered, color-tinted shadows with low opacity.
-- **Typography:** Never use the same font for headings and body. Pair a display/serif with a clean sans. Apply tight tracking (`-0.03em`) on large headings, generous line-height (`1.7`) on body.
-- **Gradients:** Layer multiple radial gradients. Add grain/texture via SVG noise filter for depth.
-- **Animations:** Only animate `transform` and `opacity`. Never `transition-all`. Use spring-style easing.
-- **Interactive states:** Every clickable element needs hover, focus-visible, and active states. No exceptions.
-- **Images:** Add a gradient overlay (`bg-gradient-to-t from-black/60`) and a color treatment layer with `mix-blend-multiply`.
-- **Spacing:** Use intentional, consistent spacing tokens — not random Tailwind steps.
-- **Depth:** Surfaces should have a layering system (base → elevated → floating), not all sit at the same z-plane.
-
-## Hard Rules
-- Do not add sections, features, or content not in the reference
-- Do not "improve" a reference design — match it
-- Do not stop after one screenshot pass
-- Do not use `transition-all`
-- Do not use default Tailwind blue/indigo as primary color
+- Dev server: `npm run dev` inside `frontend/`.
+- Screenshot/QA: use the `gstack` skill's `browse` command (already set up for
+  this project), or the Playwright e2e infra in `frontend/e2e/` (includes a
+  real authenticated-session flow via `@clerk/testing`, cached in
+  `playwright/.clerk/user.json`).
+- Before calling frontend work done: `npx tsc --noEmit` and `npm run build`
+  must both be clean. Docker note: `docker compose up` alone serves a stale
+  image — use `docker compose build && docker compose up -d` to see new code
+  in a container.
 
 ## Skill routing
 
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
-
-Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore
-- Author a backlog-ready spec/issue → invoke /spec
+Only skills that actually appear in the per-session available-skills list are
+invokable via the Skill tool. Most of gstack's broader command family
+(`/office-hours`, `/plan-*-review`, `/investigate`, `/qa`, `/review`, `/ship`,
+`/spec`, etc.) are user-run slash commands, not Claude-invokable skills — don't
+attempt to invoke them via the Skill tool just because they're documented
+somewhere. `gstack` (its `browse` QA/screenshot workflow) is the one that
+actually is.

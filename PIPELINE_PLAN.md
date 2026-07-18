@@ -1,9 +1,9 @@
 # Nimbus AI — Agent Pipeline Plan
 
-> Authoritative design for the multi-agent pipeline. **Supersedes `context.md`**
-> (which is outdated — its "Executor = plain code", "6 generic tools", and
-> "no critic loop" decisions no longer reflect the intended design). Read
-> alongside `HANDOFF.md` (session continuity) for current build status.
+> Authoritative design for the multi-agent pipeline. (Supersedes the old
+> `context.md`, now deleted — its "Executor = plain code", "6 generic tools", and
+> "no critic loop" decisions never reflected the intended design.) Read alongside
+> `DECISIONS.md` (cross-machine continuity) for current build status.
 >
 > Status of this doc: design agreed in the 2026-06-27 design session. Not yet
 > implemented — this is the build plan.
@@ -380,5 +380,5 @@ runtime config). See §4.
   hard tool-calling caveat for free HF models.
 - Replace LLM-guessed cost with a deterministic estimate.
 - Bodyguard: unchanged this round.
-- `context.md` is superseded by this document.
+- `context.md` was superseded by this document and has been deleted.
 ```

@@ -1,6 +1,7 @@
 # Nimbus — Senior Engineering Review + Professional Design Critique (2026-07-09)
 
-> Follow-up to the inline CEO + Engineering reviews in HANDOFF.md. This pass re-reads
+> Follow-up to the inline CEO + Engineering reviews in
+> `docs/archive/HANDOFF-2026-07-18.md`. This pass re-reads
 > those, reviews the codebase as it stands today (including the uncommitted UI redesign
 > in the working tree), and adds a harsh professional-designer critique of the UI.
 > Items marked **[FIXED this session]** were executed immediately after this review.

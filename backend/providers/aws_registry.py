@@ -1,7 +1,8 @@
 """The single source of truth for which AWS resource types Nimbus can manage.
 
 Every field below was confirmed against the botocore service models actually
-installed in this project (see verification notes in HANDOFF.md / DEV-4), not
+installed in this project (see verification notes in DECISIONS.md / the DEV-4
+section of docs/archive/HANDOFF-2026-07-18.md), not
 assumed from memory — AWS is inconsistent enough across services that
 guessing here would silently corrupt delete/describe calls. In particular:
 
