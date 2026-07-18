@@ -21,6 +21,19 @@ FREE_TIER_EC2_TYPES = ("t2.micro", "t3.micro")
 _RESOURCE_TYPE_ENUM = sorted(registry.REGISTRY)
 
 
+def _concise_validation_error(exc: jsonschema.ValidationError, resource_type: str) -> str:
+    """A raw jsonschema.ValidationError stringifies to the ENTIRE failing schema +
+    instance — hundreds of lines. Fed back to the model as a tool error that's a
+    terrible retry signal (it buries the one actionable fact and burns tokens).
+    Collapse it to the field path + the one-line reason the model actually needs
+    to correct the config on its next attempt."""
+    field_path = "/".join(str(p) for p in exc.absolute_path) or "(top level)"
+    return (
+        f"Config for {resource_type} is invalid at '{field_path}': {exc.message}. "
+        "Fix this field and call the tool again."
+    )
+
+
 def _validation_view(obj):
     """jsonschema's "string" type check rejects raw bytes. Blob fields (e.g.
     Lambda's Code.ZipFile) are real bytes by the time we validate, so swap
@@ -152,7 +165,12 @@ def _handle_create(resource_type: str, params: dict, session=None, free_tier_mod
     config = _apply_create_fallbacks(resource_type, params, client, session, free_tier_mode)
 
     validation_schema = generate_validation_schema(spec.service, spec.create_operation)
-    jsonschema.validate(instance=_validation_view(config), schema=validation_schema)
+    try:
+        jsonschema.validate(instance=_validation_view(config), schema=validation_schema)
+    except jsonschema.ValidationError as e:
+        # Re-raise as a plain, concise message: the tool loop turns any exception
+        # into the tool-result error the model reads before retrying this step.
+        raise ValueError(_concise_validation_error(e, resource_type)) from e
 
     config = registry.merge_tags_into_config(resource_type, config, NIMBUS_TAGS)
     response = call(client, spec.create_operation, **config)

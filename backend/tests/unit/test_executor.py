@@ -1,7 +1,6 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import jsonschema
 import pytest
 
 from agents import executor
@@ -94,16 +93,22 @@ def test_create_lambda_function_fills_role_and_code_when_missing():
 def test_create_rejects_missing_required_field_before_calling_aws():
     ddb_mock = MagicMock()
     with _patched_client_for({"dynamodb_table": ddb_mock}):
-        with pytest.raises(jsonschema.ValidationError):
+        # A bad config is rejected as a concise, model-actionable ValueError (not the
+        # raw multi-hundred-line jsonschema dump) before any AWS call happens.
+        with pytest.raises(ValueError) as exc:
             executor._handle_create("dynamodb_table", {"BillingMode": "PAY_PER_REQUEST"})
+    msg = str(exc.value)
+    assert "dynamodb_table" in msg and "Fix this field and call the tool again." in msg
     ddb_mock.create_table.assert_not_called()
 
 
 def test_create_iam_role_rejects_missing_trust_policy():
     iam_mock = MagicMock()
     with _patched_client_for({"iam_role": iam_mock}):
-        with pytest.raises(jsonschema.ValidationError):
+        with pytest.raises(ValueError) as exc:
             executor._handle_create("iam_role", {"RoleName": "x"})
+    # The message names the actual offending field so the model can correct it.
+    assert "AssumeRolePolicyDocument" in str(exc.value)
     iam_mock.create_role.assert_not_called()
 
 

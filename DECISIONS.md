@@ -48,16 +48,26 @@ boto3"). Shipped: 15 botocore-sourced per-resource `create_*` tools
 (`providers/aws_registry.py`) giving real field names/enums, **plus** a generic
 Cloud Control path (`providers/cloud_control.py`, `AWS::Service::Resource`) for
 the long tail. Curated = precise cost + special actions (stop/start EC2,
-empty-then-delete S3, Lambda-role bootstrap); generic = breadth.
-→ *This is the #1 Bitter-Lesson tension flagged for the harness upgrade: as
-models improve, make Cloud Control the primary path and demote the registry to an
-accelerator. Don't grow the registry.*
+empty-then-delete S3, Lambda-role bootstrap); generic = breadth. The executor
+already serves **both** tool sets live (`use_cloud_control=True`); the Architect
+already emits either form.
+
+The curated-vs-generic preference is a config knob:
+`ARCHITECT_RESOURCE_PREFERENCE` = `curated` (default) | `balanced` | `generic`
+(`agents/architect.py`). As models improve, `generic` lets the product cover all
+of AWS without growing the registry — but **flip it only on eval evidence**
+(`backend/evals/CHECKLIST.md`), never blindly: the curated tools carry real
+non-model value (cost, free-tier enforcement, special actions) a flip must not
+lose. Don't grow the registry.
 
 **Server-side schema validation before boto3.** Models hallucinate AMI IDs / param
 names, so every create config is `jsonschema`-validated against the
 full-fidelity botocore schema before the call. Botocore is the source of truth —
 keep this as a cheap ground-truth check; do **not** hand-author validation rules.
-Prefer feeding real boto3 errors back to the model as a retry loop.
+The executor already feeds real boto3/validation errors back to the model as a
+retry loop (tool-loop error results + `EXECUTOR_PROMPT` rule 2); validation
+failures are collapsed to a concise field+reason message
+(`_concise_validation_error`) so the retry signal is actionable, not a schema dump.
 
 **Pipeline is intentionally multi-agent (see `PIPELINE_PLAN.md`, authoritative).**
 Executor stays an LLM agent (not plain code); the critic is split into a
@@ -79,8 +89,11 @@ and no longer user-selectable (class kept for tests only). Only
 `OPENROUTER_API_KEY` exists in `backend/.env` — Groq/HF selector entries error
 with a clear message until keys are added. **Rules:** live-model verification uses
 FREE providers only (Groq/OpenRouter/HF), never frontier/Bedrock; only smart 70B+
-tool-capable models in the product selector. Finishing the provider abstraction +
-moving model IDs to config is the key "stay flexible to better models" lever.
+tool-capable models in the product selector. The provider abstraction is a thin
+one-method (`infer()`) interface; default model IDs are centralized in
+`config.MODEL_DEFAULTS` (one edit per model drop, each overridable via
+`<PROVIDER>_MODEL`). When a new model appears, run `backend/evals` against it
+before making it the default (see `backend/evals/CHECKLIST.md`).
 
 **Clerk auth is hand-rolled PyJWT + JWKS (RS256), deliberately not the SDK
 (2026-07-04).** Clerk's own guide recommends exactly JWKS+PyJWT for non-JS

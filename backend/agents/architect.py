@@ -1,4 +1,5 @@
 import json
+import os
 
 from agents.inspection import INSPECTION_TOOL_CONFIG, build_handlers
 from utils.tool_use import run_tool_loop
@@ -28,14 +29,13 @@ Each plan step is one of:
 - {{"step": 3, "action": "stop", "resource_type": "ec2_instance", "resource_id": "...", "description": "..."}}
 
 `resource_type` is either:
-  (A) one of these 15 curated short names — PREFER these whenever one fits the need, they are the
-      best-supported (validated, sensible defaults, special handling):
+  (A) one of these 15 curated short names:
       ec2_instance, s3_bucket, rds_instance, lambda_function, vpc, subnet, security_group, ecs_cluster,
       load_balancer, api_gateway, dynamodb_table, elasticache, cloudfront, nat_gateway, iam_role; OR
   (B) for ANY other AWS resource, a CloudFormation resource type name of the form "AWS::Service::Resource"
       (e.g. "AWS::SQS::Queue", "AWS::SNS::Topic", "AWS::KMS::Key", "AWS::EFS::FileSystem").
-Use a curated short name whenever one fits; only reach for a CloudFormation type name for resources outside
-that list. Never invent a name that is neither a curated short name nor a real "AWS::..." type.
+{resource_preference_clause}
+Never invent a name that is neither a curated short name nor a real "AWS::..." type.
 
 For "create" steps, `config` depends on which kind of resource_type you used:
   - Curated short name → use the resource's REAL AWS API field names (an ec2_instance config uses
@@ -59,6 +59,36 @@ IMPORTANT RULES:
 - For destructive actions (delete, terminate), clearly warn the user what will be lost
 """
 
+# Curated-vs-generic preference (Bitter-Lesson knob, PROD/DECISIONS.md). The curated
+# tools carry genuine non-model value (precise cost, free-tier enforcement, special
+# actions), so "curated" stays the default. As models get better at driving the
+# generic Cloud Control path, `generic` lets the product cover all of AWS without
+# growing the registry — flip it only with eval evidence (see backend/evals/CHECKLIST.md).
+_RESOURCE_PREFERENCE_CLAUSES = {
+    "curated": (
+        "PREFER the curated short names whenever one fits the need — they are best-supported "
+        "(validated configs, sensible defaults, precise cost, special handling). Only reach for a "
+        "CloudFormation type name for resources outside that list."
+    ),
+    "balanced": (
+        "Use whichever fits best: a curated short name for the 15 common types, or a CloudFormation "
+        "type name for anything else. Neither is preferred — choose by what the request needs."
+    ),
+    "generic": (
+        "PREFER CloudFormation type names (AWS::Service::Resource) for breadth and consistency. Use a "
+        "curated short name ONLY when you specifically need its special handling: precise cost estimates, "
+        "free-tier enforcement, or actions Cloud Control can't do (stop/start EC2, empty-then-delete S3, "
+        "Lambda execution-role bootstrap)."
+    ),
+}
+DEFAULT_RESOURCE_PREFERENCE = "curated"
+
+
+def _resource_preference_clause() -> str:
+    pref = os.getenv("ARCHITECT_RESOURCE_PREFERENCE", DEFAULT_RESOURCE_PREFERENCE).lower()
+    return _RESOURCE_PREFERENCE_CLAUSES.get(pref, _RESOURCE_PREFERENCE_CLAUSES[DEFAULT_RESOURCE_PREFERENCE])
+
+
 FREE_TIER_CLAUSE = """STRICT FREE-TIER MODE IS ON.
 Only recommend free-tier eligible configurations:
 - ec2_instance: ONLY InstanceType t2.micro or t3.micro
@@ -73,7 +103,10 @@ Still prefer cost-effective options and be transparent about costs."""
 
 def _build_system_prompt(free_tier_mode: bool = True) -> str:
     clause = FREE_TIER_CLAUSE if free_tier_mode else FLEXIBLE_CLAUSE
-    return BASE_PROMPT.format(free_tier_clause=clause)
+    return BASE_PROMPT.format(
+        free_tier_clause=clause,
+        resource_preference_clause=_resource_preference_clause(),
+    )
 
 
 # ---------------------------------------------------------------------------
