@@ -12,31 +12,31 @@ frozen historical narrative lives at `docs/archive/HANDOFF-2026-07-18.md`.
 
 ## Frontend design system (already built — reuse it, don't reinvent it)
 
-- Tokens and base styles live in `frontend/app/globals.css`: the `ion-*` accent
-  scale (`--color-ion-50`…`950`, built off `#2e9ee0`), dark base
-  (`--background: #05070a`), Geist sans/mono + Outfit display font. Use these,
-  not default Tailwind colors (indigo-500/blue-600 etc. were deliberately
-  removed from this project).
-- Established surface/effect classes: `.glass` / `.glass-light` (card
-  treatment), `.bg-grain` (SVG noise overlay), `.glow-blue` /
-  `.glow-blue-hover` (tinted shadow, not a blurred neon glow). Extend these
-  rather than hand-rolling new card/shadow recipes.
-- Tailwind v4 — config is CSS-based in `globals.css` (`@theme inline`), there is
-  no `tailwind.config.js`.
-- Already-installed UI deps: `@phosphor-icons/react` for icons, `framer-motion`
-  for animation, `@clerk/nextjs` for auth. Use these before reaching for a new
-  library.
+**Source of truth: `frontend/app/globals.css` and the existing components.** Read
+them and match what's there — the `ion-*` accent scale, the dark base, the
+display/mono fonts, and the `.glass` / `.glass-light` / `.bg-grain` /
+`.glow-blue` / `.glow-blue-hover` surface classes are all defined there with
+their rationale in the comments. Don't transcribe or re-derive those values here;
+extend the existing classes rather than hand-rolling new card/shadow recipes.
+
+Non-obvious rules that reading the CSS won't tell you:
+
+- Default Tailwind colors (indigo-500 / blue-600 etc.) were **deliberately
+  removed** from this project — don't reintroduce them; stay on the `ion-*` scale.
+- Tailwind v4, config is CSS-based in `globals.css` (`@theme inline`) — there is
+  **no** `tailwind.config.js`.
+- Use what's already installed before reaching for a new library — icons
+  (`@phosphor-icons/react`), animation (`framer-motion`), auth
+  (`@clerk/nextjs`). Check `package.json`.
 - Animate `transform`/`opacity` only, spring-style easing, never
-  `transition-all` — this is the project's own established rule (see
-  `LoomBackground.tsx`). `prefers-reduced-motion` is already handled globally
-  in `globals.css`; anything you animate must still degrade correctly under it.
-- `:focus-visible` gets a visible ring globally already — every new
-  interactive element needs hover/focus/active states, don't bypass the
-  existing ring.
-- Known debt, don't compound it: every card currently uses the identical flat
-  `.glass` treatment with no base/elevated/floating layering, and heading vs.
-  body type scale is timid in places (tracked as UX-4 in `DECISIONS.md`). Give
-  new surfaces real depth instead of defaulting to another flat `.glass` div.
+  `transition-all` (see `LoomBackground.tsx` for the pattern).
+  `prefers-reduced-motion` is handled globally — anything you animate must still
+  degrade correctly under it.
+- A `:focus-visible` ring is applied globally — every new interactive element
+  needs hover/focus/active states and must not bypass it.
+- Known debt, don't compound it (UX-4 in `DECISIONS.md`): every card is the same
+  flat `.glass` with no base/elevated/floating layering, and the type scale is
+  timid. Give new surfaces real depth instead of another flat `.glass` div.
 
 ## Verifying frontend changes
 
