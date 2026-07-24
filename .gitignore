@@ -34,3 +34,6 @@ frontend/playwright-report/
 frontend/playwright/.clerk/
 .gstack/
 loadtest/out/
+
+# Claude Code personal project-local settings (hooks, etc.) — not shared
+.claude/settings.local.json

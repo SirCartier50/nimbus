@@ -17,8 +17,9 @@ Next.js 16 / React 19 / TS frontend · Postgres (Supabase) · Clerk auth · boto
 
 Agentic AWS management: users describe infrastructure in plain English; AI agents
 (Requirements, Architect, Executor + deterministic Validator/Cost/Bodyguard)
-plan, deploy, and monitor it. Originally a Nova hackathon build; goal now is
-production-ready and publicly deployable.
+plan, deploy, and monitor it. It started as a hackathon idea but is being built
+as a real product aiming for a genuine user base — treat it as production
+software headed for real users, not a demo.
 
 ---
 

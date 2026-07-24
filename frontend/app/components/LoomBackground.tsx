@@ -13,6 +13,9 @@ import { useEffect, useRef } from "react";
 const NODE_COUNT = 44;
 const LINK_DIST = 210;
 const DRIFT = 0.16; // px per frame at 60fps — barely perceptible motion
+const CURSOR_DIST = 200; // radius within which the mesh reacts to the pointer
+const PARALLAX = 14; // max px the field drifts toward the cursor
+const EASE = 0.06; // how quickly parallax/cursor state catches up (lower = smoother)
 
 type Node = { x: number; y: number; vx: number; vy: number; r: number };
 
@@ -29,6 +32,16 @@ export default function LoomBackground() {
     let height = 0;
     let nodes: Node[] = [];
     let raf = 0;
+
+    // Cursor state. `px/py` is the raw pointer (canvas-local); `ox/oy` is the
+    // eased parallax offset applied to the whole field so it glides rather than
+    // snaps. `active` gates all cursor-reactive drawing so the mesh is inert
+    // until the pointer is actually over the hero.
+    let px = -9999;
+    let py = -9999;
+    let ox = 0;
+    let oy = 0;
+    let active = false;
 
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -55,6 +68,14 @@ export default function LoomBackground() {
 
     const draw = () => {
       ctx.clearRect(0, 0, width, height);
+      // The whole field is offset by the eased parallax so it drifts toward the
+      // cursor as one plane; cursor math below uses the same offset so links to
+      // the pointer stay accurate.
+      const mx = px - ox;
+      const my = py - oy;
+
+      ctx.save();
+      ctx.translate(ox, oy);
 
       // Threads first, under the nodes. Alpha falls off with distance so
       // links fade in/out as the graph reconfigures instead of popping.
@@ -76,14 +97,38 @@ export default function LoomBackground() {
       }
 
       for (const n of nodes) {
-        ctx.fillStyle = "rgba(124, 190, 232, 0.45)";
+        // Nodes near the cursor brighten and thread toward it — the mesh
+        // "notices" the pointer, reinforcing the living-graph metaphor.
+        let glow = 0;
+        if (active) {
+          const cd = Math.hypot(n.x - mx, n.y - my);
+          if (cd < CURSOR_DIST) {
+            glow = 1 - cd / CURSOR_DIST;
+            ctx.strokeStyle = `rgba(93, 187, 242, ${glow * 0.35})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(n.x, n.y);
+            ctx.lineTo(mx, my);
+            ctx.stroke();
+          }
+        }
+        ctx.fillStyle = `rgba(124, 190, 232, ${0.45 + glow * 0.45})`;
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, n.r + glow * 1.3, 0, Math.PI * 2);
         ctx.fill();
       }
+
+      ctx.restore();
     };
 
     const step = () => {
+      // Ease the field toward a small offset proportional to how far the cursor
+      // sits from center — pure parallax, no layout impact.
+      const targetX = active ? ((px / width) - 0.5) * -2 * PARALLAX : 0;
+      const targetY = active ? ((py / height) - 0.5) * -2 * PARALLAX : 0;
+      ox += (targetX - ox) * EASE;
+      oy += (targetY - oy) * EASE;
+
       for (const n of nodes) {
         n.x += n.vx;
         n.y += n.vy;
@@ -100,12 +145,29 @@ export default function LoomBackground() {
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
+    // Pointer tracking is mapped into canvas-local coords. The canvas is
+    // pointer-events-none (it sits behind the hero content), so we listen on
+    // the window and translate against the canvas rect.
+    const onPointerMove = (e: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      px = e.clientX - rect.left;
+      py = e.clientY - rect.top;
+      active = px >= 0 && px <= width && py >= 0 && py <= height;
+    };
+    const onPointerLeave = () => {
+      active = false;
+    };
+
     const start = () => {
       cancelAnimationFrame(raf);
       resize();
       seed();
       if (reducedMotion.matches) {
-        // One settled frame — the mesh stays as texture, it just doesn't move.
+        // One settled frame — the mesh stays as texture, it just doesn't move,
+        // and it does NOT react to the pointer.
+        active = false;
+        ox = 0;
+        oy = 0;
         draw();
       } else {
         raf = requestAnimationFrame(step);
@@ -115,11 +177,15 @@ export default function LoomBackground() {
     start();
     window.addEventListener("resize", start);
     reducedMotion.addEventListener("change", start);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerleave", onPointerLeave);
 
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", start);
       reducedMotion.removeEventListener("change", start);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerleave", onPointerLeave);
     };
   }, []);
 

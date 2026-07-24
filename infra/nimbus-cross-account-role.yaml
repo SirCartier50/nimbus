@@ -4,7 +4,11 @@ Description: >
   STS AssumeRole. No long-lived credentials of yours are ever stored by
   Nimbus — the ExternalId below (shown to you in Nimbus Settings) is the
   only thing that has to match, and you can delete this stack at any time
-  to instantly revoke access.
+  to instantly revoke access. By default the role is scoped with
+  LEAST-PRIVILEGE to only the AWS services Nimbus actually provisions, so a
+  bug — or a prompt-injection attack against the agent — cannot reach
+  services Nimbus was never meant to touch (see docs/security/prompt-injection.md,
+  P0-2). Set AccessScope=PowerUser only if you want the older broad grant.
 
 Parameters:
   ExternalId:
@@ -23,14 +27,19 @@ Parameters:
       default unless Nimbus has told you to use a different value.
     Default: "arn:aws:iam::804306814230:user/botouser"
 
-  PolicyArn:
+  AccessScope:
     Type: String
+    AllowedValues: ["Scoped", "PowerUser"]
+    Default: "Scoped"
     Description: >
-      The managed policy attached to the role Nimbus assumes. Defaults to
-      PowerUserAccess (full resource management, excluding IAM/account
-      administration) to match what Nimbus's onboarding asks for. Narrow
-      this if you want to scope Nimbus down further.
-    Default: "arn:aws:iam::aws:policy/PowerUserAccess"
+      Scoped (recommended) = a least-privilege inline policy limited to the
+      services Nimbus provisions. PowerUser = the broad AWS-managed
+      PowerUserAccess policy (full resource management except IAM/account
+      admin). Scoped is the injection blast-radius cap; prefer it.
+
+Conditions:
+  IsScoped: !Equals [!Ref AccessScope, "Scoped"]
+  IsPowerUser: !Equals [!Ref AccessScope, "PowerUser"]
 
 Resources:
   NimbusAccessRole:
@@ -49,8 +58,84 @@ Resources:
             Condition:
               StringEquals:
                 sts:ExternalId: !Ref ExternalId
+      # PowerUser path: attach the broad managed policy. Scoped path: no managed
+      # policy — the inline least-privilege policy below is the whole grant.
       ManagedPolicyArns:
-        - !Ref PolicyArn
+        !If
+          - IsPowerUser
+          - ["arn:aws:iam::aws:policy/PowerUserAccess"]
+          - !Ref "AWS::NoValue"
+      Policies:
+        !If
+          - IsScoped
+          - - PolicyName: NimbusLeastPrivilege
+              PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  # 1) The provisioning services in Nimbus's resource registry.
+                  #    Broad WITHIN each namespace (Nimbus creates/reads/deletes
+                  #    arbitrary resources of these types) but nothing outside it —
+                  #    that boundary is the point.
+                  - Sid: CoreProvisioning
+                    Effect: Allow
+                    Action:
+                      - "ec2:*"
+                      - "s3:*"
+                      - "rds:*"
+                      - "lambda:*"
+                      - "dynamodb:*"
+                      - "ecs:*"
+                      - "elasticloadbalancing:*"
+                      - "apigateway:*"
+                      - "cloudfront:*"
+                      - "elasticache:*"
+                    Resource: "*"
+                  # 2) Generic breadth path (Cloud Control / CloudFormation). Cloud
+                  #    Control can only ultimately act through the underlying service
+                  #    perms granted above, so this stays least-privilege by
+                  #    construction — a type outside the granted namespaces is denied
+                  #    at the underlying service.
+                  - Sid: GenericControlPlane
+                    Effect: Allow
+                    Action:
+                      - "cloudformation:*"
+                      - "cloudcontrol:*"
+                    Resource: "*"
+                  # 3) Observability, cost, tagging, identity — all read-only, used
+                  #    by Bodyguard (metrics), the cost estimator (pricing), and
+                  #    resource lookups (tagging / caller identity).
+                  - Sid: ReadOnlySupport
+                    Effect: Allow
+                    Action:
+                      - "cloudwatch:GetMetricData"
+                      - "cloudwatch:GetMetricStatistics"
+                      - "cloudwatch:ListMetrics"
+                      - "tag:GetResources"
+                      - "tag:GetTagKeys"
+                      - "pricing:GetProducts"
+                      - "pricing:DescribeServices"
+                      - "sts:GetCallerIdentity"
+                    Resource: "*"
+                  # 4) IAM — the escalation-sensitive namespace, so it is scoped to
+                  #    the NARROW set of actions Nimbus needs (create service/exec
+                  #    roles for Lambda etc. and pass them), never full iam:*.
+                  - Sid: ScopedIam
+                    Effect: Allow
+                    Action:
+                      - "iam:CreateRole"
+                      - "iam:GetRole"
+                      - "iam:DeleteRole"
+                      - "iam:TagRole"
+                      - "iam:AttachRolePolicy"
+                      - "iam:DetachRolePolicy"
+                      - "iam:PutRolePolicy"
+                      - "iam:DeleteRolePolicy"
+                      - "iam:ListRolePolicies"
+                      - "iam:ListAttachedRolePolicies"
+                      - "iam:PassRole"
+                      - "iam:CreateServiceLinkedRole"
+                    Resource: "*"
+          - !Ref "AWS::NoValue"
       Tags:
         - Key: ManagedBy
           Value: Nimbus

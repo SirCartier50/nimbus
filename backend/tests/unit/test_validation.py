@@ -1,5 +1,42 @@
 """Tier-1 deterministic plan validation."""
-from pipeline.validation import validate_plan
+from pipeline.validation import check_exfil_intent, validate_plan
+
+
+# ---- P3-2 exfil-intent advisories ---------------------------------------
+
+def test_exfil_flags_public_s3_acl():
+    plan = {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {"ACL": "public-read"}}]}
+    warnings = check_exfil_intent(plan)
+    assert any("public ACL" in w for w in warnings)
+
+
+def test_exfil_flags_disabled_public_access_block():
+    plan = {"plan": [{"action": "create", "resource_type": "AWS::S3::Bucket",
+                      "config": {"PublicAccessBlockConfiguration": {"BlockPublicAcls": False}}}]}
+    assert any("public-access block" in w for w in check_exfil_intent(plan))
+
+
+def test_exfil_flags_open_security_group():
+    plan = {"plan": [{"action": "create", "resource_type": "security_group",
+                      "config": {"IpPermissions": [
+                          {"FromPort": 22, "ToPort": 22, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}]}}]}
+    assert any("entire internet" in w for w in check_exfil_intent(plan))
+
+
+def test_exfil_clean_on_scoped_plan():
+    plan = {"plan": [
+        {"action": "create", "resource_type": "s3_bucket", "config": {"Bucket": "b"}},
+        {"action": "create", "resource_type": "security_group",
+         "config": {"IpPermissions": [{"IpRanges": [{"CidrIp": "10.0.0.0/8"}]}]}},
+    ]}
+    assert check_exfil_intent(plan) == []
+
+
+def test_exfil_is_advisory_not_blocking():
+    # A public bucket is a WARNING, never a Tier-1 blocking issue (it may be intended).
+    plan = {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {"ACL": "public-read"}}]}
+    assert validate_plan(plan) == []            # not blocked
+    assert check_exfil_intent(plan)             # but advised
 
 
 def test_clean_plan_has_no_issues():

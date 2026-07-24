@@ -24,6 +24,26 @@ _BEDROCK_CONFIG = Config(
 )
 
 
+class NoUserAWSSession(RuntimeError):
+    """A user-scoped AWS client was requested without a per-user session.
+
+    Raised instead of silently building the client from Nimbus's own operator
+    credentials. Falling back there was a real privilege-escalation path: a user
+    who never connected an AWS role has aws_session=None, and without this guard
+    every boto3 client would resolve to the operator (botouser) account — so a
+    plan would provision/delete/read resources in Nimbus's OWN account, and the
+    dashboard would surface the operator's resources to any authenticated user.
+    """
+
+
+# The only services allowed to fall back to Nimbus's operator credentials when
+# no per-user session is supplied. `sts` bootstraps every AssumeRole (that call
+# IS made with the operator identity, by design); `pricing` returns public,
+# account-independent list prices. Every other service operates ON a user's
+# account and MUST be built from that user's assumed-role session.
+_OPERATOR_CRED_SERVICES = frozenset({"sts", "pricing"})
+
+
 def get_boto3_session(access_key_id: str = None, secret_access_key: str = None, region: str = None) -> boto3.Session:
     """Build a boto3 Session from explicit credentials, falling back to process env vars."""
     return boto3.Session(
@@ -36,7 +56,16 @@ def get_boto3_session(access_key_id: str = None, secret_access_key: str = None, 
 def make_client(service: str, session: boto3.Session = None, **kwargs):
     """Central client factory — build every boto3 client through here so the
     timeout/retry Config above applies everywhere, including clients created
-    from per-user assumed-role sessions."""
+    from per-user assumed-role sessions.
+
+    Fail closed: a user-scoped service with no session must NOT silently borrow
+    Nimbus's operator credentials (see NoUserAWSSession)."""
+    if session is None and service not in _OPERATOR_CRED_SERVICES:
+        raise NoUserAWSSession(
+            f"Refusing to build a '{service}' client from Nimbus's operator "
+            "credentials — no per-user AWS session was supplied. The user must "
+            "connect their AWS account first."
+        )
     config = _BEDROCK_CONFIG if service == "bedrock-runtime" else _BASE_CONFIG
     return (session or get_boto3_session()).client(service, config=config, **kwargs)
 

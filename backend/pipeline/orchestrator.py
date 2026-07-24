@@ -37,7 +37,7 @@ from agents.requirements import build_spec_handoff, run_requirements
 from agents.summary import run_summary
 from pipeline.cost import estimate_plan_cost
 from pipeline.state import PipelineState
-from pipeline.validation import validate_plan
+from pipeline.validation import check_exfil_intent, validate_plan
 from pipeline.validator import run_validator
 
 # Backstop for the validate→architect cycle. The primary stop is convergence (issues
@@ -139,11 +139,14 @@ def finalize_node(state: PipelineState) -> dict:
     plan["cost_breakdown"] = cost["breakdown"]
 
     critique = run_critic(state.requirements_spec, plan, provider=state.provider)
+    # P3-2: deterministic exfil-shape advisories join the critic's suggestions so
+    # public-bucket / open-SG plans are flagged for explicit confirm at the gate.
+    exfil = check_exfil_intent(plan)
     return {
         "plan": plan,
         "pending_plan": plan,
         "validation_blocking": state.validation_blocking + critique["blocking_issues"],
-        "validation_suggestions": critique["suggestions"],
+        "validation_suggestions": exfil + critique["suggestions"],
     }
 
 

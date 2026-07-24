@@ -76,3 +76,77 @@ def validate_plan(plan: dict, free_tier_mode: bool = True) -> list[str]:
                 issues.append(f"Step {idx}: {action} {rt} is missing a resource_id.")
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Exfiltration-intent advisories (P3-2, docs/security/prompt-injection.md)
+#
+# Deterministic, code-only checks for resource shapes that open a data-egress or
+# public-exposure channel — the exact shapes a successful prompt injection would
+# use to leak a user's data (public bucket, world-open security group). Unlike
+# validate_plan these are NOT blocking: a public bucket / open port is sometimes
+# genuinely intended, so we surface them as high-risk ADVISORIES at the human
+# approval gate ("confirm this is intended") rather than silently refining them
+# away. Defense-in-depth on top of the plan-subset + managed-only invariants.
+# ---------------------------------------------------------------------------
+
+_OPEN_CIDRS = {"0.0.0.0/0", "::/0"}
+_PUBLIC_S3_ACLS = {"public-read", "public-read-write", "authenticated-read"}
+
+
+def _walk(obj):
+    """Yield every dict nested anywhere in a config, so a check finds the field
+    regardless of how deeply the model nested it (CFN vs. flat API shape)."""
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk(v)
+
+
+def check_exfil_intent(plan: dict) -> list[str]:
+    """Return a list of high-risk-egress advisory strings (empty == none). Never
+    blocking; meant for the approval gate."""
+    warnings: list[str] = []
+    steps = plan.get("plan") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return warnings
+
+    for idx, step in enumerate(steps, 1):
+        if not isinstance(step, dict) or step.get("action") != "create":
+            continue
+        rt = step.get("resource_type")
+        config = step.get("config") or {}
+        rt_l = rt.lower() if isinstance(rt, str) else ""
+
+        # Public S3 bucket — a canonical exfil channel.
+        if "s3" in rt_l or "bucket" in rt_l:
+            for d in _walk(config):
+                acl = d.get("ACL") or d.get("AccessControl")
+                if isinstance(acl, str) and acl.lower() in _PUBLIC_S3_ACLS:
+                    warnings.append(
+                        f"Step {idx}: S3 bucket is created with a public ACL "
+                        f"('{acl}') - anyone on the internet could read its contents. "
+                        "Confirm this is intended."
+                    )
+                pab = d.get("PublicAccessBlockConfiguration")
+                if isinstance(pab, dict) and any(v is False for v in pab.values()):
+                    warnings.append(
+                        f"Step {idx}: S3 bucket disables part of its public-access block "
+                        "- it may be publicly reachable. Confirm this is intended."
+                    )
+
+        # Security group opened to the whole internet.
+        if "security" in rt_l or "securitygroup" in rt_l or rt == "security_group":
+            for d in _walk(config):
+                cidr = d.get("CidrIp") or d.get("CidrIpv6")
+                if isinstance(cidr, str) and cidr in _OPEN_CIDRS:
+                    port = d.get("ToPort", d.get("FromPort", "any"))
+                    warnings.append(
+                        f"Step {idx}: security group allows inbound access from {cidr} "
+                        f"(the entire internet) on port {port} - confirm this is intended."
+                    )
+
+    return warnings

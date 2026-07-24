@@ -2,9 +2,12 @@
 
 get_provider() selects an adapter; run_tool_loop() is the drop-in convenience the
 agents call. By default it uses the env-selected provider (LLM_PROVIDER), which is
-Bedrock unless overridden, so existing call sites keep working unchanged. Pass an
-explicit provider name (or instance) to run_tool_loop() to override per call —
-that's the hook the pipeline uses to honor a user's chosen model.
+`openrouter` unless overridden (Bedrock was removed as the default on 2026-07-15 —
+it silently billed the operator's AWS account; the class is kept for tests only).
+Pass an explicit provider name (or instance) to run_tool_loop() to override per
+call — that's the hook the pipeline uses to honor a user's chosen model. Default
+model IDs live in config.MODEL_DEFAULTS (one edit per model drop), each overridable
+via the matching <PROVIDER>_MODEL env var.
 """
 import os
 

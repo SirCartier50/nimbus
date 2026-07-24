@@ -148,9 +148,15 @@ def test_create_ecs_cluster_uses_lowercase_tags():
     assert ecs_mock.create_cluster.call_args.kwargs["tags"] == [{"key": "ManagedBy", "value": "Nimbus"}]
 
 
+# A ManagedBy=Nimbus describe response, so the P0-3 managed-only guard lets the
+# delete/stop proceed. Real Nimbus resources always carry this tag.
+_MANAGED = {"Tags": [{"Key": "ManagedBy", "Value": "Nimbus"}]}
+
+
 def test_delete_vpc_uses_singular_id_param():
     vpc_mock = MagicMock()
-    with _patched_client_for({"vpc": vpc_mock}):
+    with _patched_client_for({"vpc": vpc_mock}), \
+         patch.object(executor, "get_resource_status", return_value=_MANAGED):
         executor._handle_delete("vpc", {"resource_id": "vpc-1"})
     assert vpc_mock.delete_vpc.call_args.kwargs == {"VpcId": "vpc-1"}
 
@@ -161,7 +167,8 @@ def test_delete_s3_bucket_empties_before_deleting():
     paginator.paginate.return_value = [{"Contents": [{"Key": "a.txt"}, {"Key": "b.txt"}]}]
     s3_mock.get_paginator.return_value = paginator
 
-    with _patched_client_for({"s3_bucket": s3_mock}):
+    with _patched_client_for({"s3_bucket": s3_mock}), \
+         patch.object(executor, "get_resource_status", return_value=_MANAGED):
         executor._handle_delete("s3_bucket", {"resource_id": "my-bucket"})
 
     s3_mock.delete_objects.assert_called_once_with(
@@ -174,10 +181,121 @@ def test_delete_cloudfront_fetches_etag_first():
     cf_mock = MagicMock()
     cf_mock.get_distribution.return_value = {"ETag": "E456", "Distribution": {"Id": "DIST1"}}
 
-    with _patched_client_for({"cloudfront": cf_mock}):
+    with _patched_client_for({"cloudfront": cf_mock}), \
+         patch.object(executor, "get_resource_status", return_value=_MANAGED):
         executor._handle_delete("cloudfront", {"resource_id": "DIST1"})
 
     assert cf_mock.delete_distribution.call_args.kwargs == {"Id": "DIST1", "IfMatch": "E456"}
+
+
+# ---------------------------------------------------------------------------
+# Prompt-injection defenses (docs/security/prompt-injection.md)
+# ---------------------------------------------------------------------------
+
+
+def test_build_action_budget_maps_every_action_shape():
+    plan = {"plan": [
+        {"action": "create", "resource_type": "s3_bucket", "config": {}},
+        {"action": "create", "resource_type": "AWS::SQS::Queue", "config": {}},
+        {"action": "delete", "resource_type": "vpc", "resource_id": "vpc-9"},
+        {"action": "stop", "resource_type": "ec2_instance", "resource_id": "i-9"},
+    ]}
+    b = executor._build_action_budget(plan)
+    assert b["creates"] == {"s3_bucket", "AWS::SQS::Queue"}
+    assert b["delete_ids"] == {"vpc-9"}
+    assert b["stop_ids"] == {"i-9"}
+
+
+def test_guard_blocks_unapproved_create_and_allows_approved():
+    budget = executor._build_action_budget(
+        {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {}}]}
+    )
+    hits = []
+    handler = lambda p: hits.append(1) or {"success": True}
+
+    approved = executor._guarded("create_s3_bucket", handler, budget)
+    assert approved({})["success"] is True and hits == [1]
+
+    hits.clear()
+    blocked = executor._guarded("create_ec2_instance", handler, budget)({})
+    assert blocked["success"] is False and blocked["blocked"] and hits == []
+    assert "approved plan" in blocked["error"]
+
+
+def test_guard_blocks_delete_of_unapproved_id():
+    budget = executor._build_action_budget(
+        {"plan": [{"action": "delete", "resource_type": "vpc", "resource_id": "vpc-ok"}]}
+    )
+    handler = lambda p: {"success": True}
+    g = executor._guarded("delete_resource", handler, budget)
+    assert g({"resource_type": "vpc", "resource_id": "vpc-ok"})["success"] is True
+    evil = g({"resource_type": "vpc", "resource_id": "vpc-EVIL"})
+    assert evil["blocked"] and "not part of the approved plan" in evil["error"]
+
+
+def test_guard_lets_readonly_tools_through_unconditionally():
+    budget = executor._build_action_budget({"plan": []})  # nothing approved
+    handler = lambda p: {"ok": True}
+    for name in ("get_resource_status", "list_resources", "get_resource_by_type", "list_resources_by_type"):
+        assert executor._guarded(name, handler, budget)({})["ok"] is True
+
+
+def test_stop_ec2_by_type_injection_is_blocked_when_not_in_plan():
+    budget = executor._build_action_budget(
+        {"plan": [{"action": "stop", "resource_type": "ec2_instance", "resource_id": "i-approved"}]}
+    )
+    g = executor._guarded("stop_ec2_instance", lambda p: {"success": True}, budget)
+    assert g({"instance_id": "i-approved"})["success"] is True
+    assert g({"instance_id": "i-attacker"})["blocked"] is True
+
+
+def test_managed_only_refuses_untagged_delete():
+    vpc_mock = MagicMock()
+    with _patched_client_for({"vpc": vpc_mock}), \
+         patch.object(executor, "get_resource_status", return_value={"Tags": [{"Key": "Owner", "Value": "someone"}]}):
+        with pytest.raises(executor.NotManagedByNimbus):
+            executor._handle_delete("vpc", {"resource_id": "vpc-1"})
+    vpc_mock.delete_vpc.assert_not_called()
+
+
+def test_managed_only_refuses_stop_of_unmanaged_instance():
+    ec2_mock = MagicMock()
+    untagged = {"Reservations": [{"Instances": [{"InstanceId": "i-1", "Tags": []}]}]}
+    with _patched_client_for({"ec2_instance": ec2_mock}), \
+         patch.object(executor, "get_resource_status", return_value=untagged):
+        with pytest.raises(executor.NotManagedByNimbus):
+            executor._handle_stop_ec2({"instance_id": "i-1"})
+    ec2_mock.stop_instances.assert_not_called()
+
+
+def test_managed_only_allows_stop_of_nimbus_instance():
+    ec2_mock = MagicMock()
+    tagged = {"Reservations": [{"Instances": [
+        {"InstanceId": "i-1", "Tags": [{"Key": "ManagedBy", "Value": "Nimbus"}]}
+    ]}]}
+    with _patched_client_for({"ec2_instance": ec2_mock}), \
+         patch.object(executor, "get_resource_status", return_value=tagged):
+        result = executor._handle_stop_ec2({"instance_id": "i-1"})
+    assert result["success"]
+    ec2_mock.stop_instances.assert_called_once_with(InstanceIds=["i-1"])
+
+
+def test_managed_only_fails_closed_when_describe_errors():
+    ec2_mock = MagicMock()
+    with _patched_client_for({"ec2_instance": ec2_mock}), \
+         patch.object(executor, "get_resource_status", side_effect=Exception("AccessDenied")):
+        with pytest.raises(executor.NotManagedByNimbus):
+            executor._handle_stop_ec2({"instance_id": "i-1"})
+    ec2_mock.stop_instances.assert_not_called()
+
+
+def test_has_nimbus_tag_recognizes_tag_shapes():
+    assert executor._has_nimbus_tag({"Tags": [{"Key": "ManagedBy", "Value": "Nimbus"}]})
+    assert executor._has_nimbus_tag({"tags": [{"key": "ManagedBy", "value": "Nimbus"}]})
+    assert executor._has_nimbus_tag({"ManagedBy": "Nimbus"})
+    assert executor._has_nimbus_tag({"a": {"b": [{"Key": "ManagedBy", "Value": "Nimbus"}]}})
+    assert not executor._has_nimbus_tag({"Tags": [{"Key": "ManagedBy", "Value": "SomethingElse"}]})
+    assert not executor._has_nimbus_tag({"Tags": []})
 
 
 def test_create_and_generic_tools_have_matching_handler_names():
@@ -211,13 +329,60 @@ def test_cc_create_handler_injects_nimbus_tag():
     assert {"Key": "ManagedBy", "Value": "Nimbus"} in sent["Tags"]
 
 
+def _cc_described(tags):
+    return {"ResourceDescription": {"Identifier": "my-queue", "Properties": json.dumps({"Tags": tags})}}
+
+
 def test_cc_delete_handler_calls_cloud_control():
     client = MagicMock()
+    client.get_resource.return_value = _cc_described([{"Key": "ManagedBy", "Value": "Nimbus"}])
     client.delete_resource.return_value = _cc_progress(identifier="my-queue")
     with patch("providers.cloud_control._client", return_value=client):
         result = executor._handle_cc_delete({"type_name": "AWS::SQS::Queue", "resource_id": "my-queue"})
     assert result["success"]
     assert client.delete_resource.call_args.kwargs == {"TypeName": "AWS::SQS::Queue", "Identifier": "my-queue"}
+
+
+def test_cc_delete_refuses_unmanaged_resource():
+    client = MagicMock()
+    client.get_resource.return_value = _cc_described([{"Key": "Owner", "Value": "someone"}])
+    with patch("providers.cloud_control._client", return_value=client):
+        with pytest.raises(executor.NotManagedByNimbus):
+            executor._handle_cc_delete({"type_name": "AWS::SQS::Queue", "resource_id": "my-queue"})
+    client.delete_resource.assert_not_called()
+
+
+def test_run_executor_fails_closed_without_aws_session():
+    """A plan with real steps must NOT execute against operator credentials when
+    the user has no connected AWS role (aws_session=None). It returns one blocked
+    failure per step and never enters the agent loop."""
+    plan = {"plan": [
+        {"action": "create", "resource_type": "s3_bucket", "description": "make a bucket"},
+        {"action": "delete", "resource_type": "ec2_instance", "resource_id": "i-1"},
+    ]}
+    with patch.object(executor, "run_tool_loop", side_effect=AssertionError("must not run")):
+        result = executor.run_executor(plan, aws_session=None, allow_destructive=True)
+
+    assert len(result["results"]) == 2
+    assert all(r["success"] is False and r["blocked"] is True for r in result["results"])
+    assert all("connect" in r["error"].lower() for r in result["results"])
+
+
+def test_run_executor_empty_plan_still_wires_tools_without_session():
+    """The fail-closed guard keys on real steps — an empty plan (tool-wiring
+    check) is unaffected even with no session."""
+    with patch.object(executor, "run_tool_loop", return_value={"text": "", "messages": []}) as loop:
+        executor.run_executor({"plan": []}, aws_session=None, allow_destructive=True)
+    loop.assert_called_once()
+
+
+def test_make_client_refuses_operator_creds_for_user_scoped_service():
+    """Root-cause backstop: user-scoped services can't silently borrow operator
+    credentials; sts/pricing (bootstrap + public data) still may."""
+    from utils import aws_clients
+    for svc in ("ec2", "s3", "dynamodb", "lambda", "iam", "cloudwatch"):
+        with pytest.raises(aws_clients.NoUserAWSSession):
+            aws_clients.make_client(svc, session=None)
 
 
 def test_run_executor_wires_cloud_control_tools_only_when_enabled():

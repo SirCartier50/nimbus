@@ -1,9 +1,9 @@
 ﻿"use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import Link from "next/link";
 import { ArrowRight } from "@phosphor-icons/react";
 import { NimbusIcon } from "./components/NimbusLogo";
@@ -92,12 +92,35 @@ function ChatPreview() {
     return <span className="text-xs font-bold font-mono">fn</span>;
   };
 
+  // ── Live sequence ──────────────────────────────────────────────────────
+  // The preview plays the actual product beat — ask → think → plan streams in
+  // → cost + deploy — then loops, so the hero feels like something happening
+  // rather than a frozen screenshot. Phases:
+  //   0 typing · 1 reply text · 2-4 each plan step · 5 cost+deploy · then loop.
+  const reduce = useReducedMotion();
+  const LAST_PHASE = 5;
+  const [phase, setPhase] = useState(reduce ? LAST_PHASE : 0);
+
+  useEffect(() => {
+    if (reduce) return; // reduced-motion: show the settled final state, no loop
+    // Per-phase dwell (ms): a beat to "type", then steps land in quick
+    // succession, then a long hold on the finished plan before restarting.
+    const dwell = [1100, 700, 450, 450, 450, 3600];
+    const t = setTimeout(
+      () => setPhase((p) => (p >= LAST_PHASE ? 0 : p + 1)),
+      dwell[phase],
+    );
+    return () => clearTimeout(t);
+  }, [phase, reduce]);
+
+  const stepsShown = Math.max(0, Math.min(planSteps.length, phase - 1));
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 1.2, duration: 0.8 }}
-      className="glass w-full rounded-2xl p-6 text-left"
+      className="glass glow-blue w-full rounded-2xl p-6 text-left"
     >
       <div className="flex justify-end">
         <div className="max-w-[75%] rounded-2xl bg-slate-800 px-4 py-2.5 text-sm leading-relaxed text-slate-100">
@@ -105,48 +128,91 @@ function ChatPreview() {
         </div>
       </div>
 
-      <motion.div
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 1.7, duration: 0.4 }}
-        className="mt-4 flex gap-3"
-      >
+      <div className="mt-4 flex gap-3">
         <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-ion-500 to-ion-400 text-[10px] font-bold text-white">
           N
         </div>
         <div className="min-w-0 flex-1 text-sm leading-relaxed text-slate-200">
-          <p>Here is a plan that fits a small, low-traffic API.</p>
-          <div className="mt-3 rounded-xl border border-ion-500/20 bg-ion-500/5 p-4">
-            <div className="space-y-2">
-              {planSteps.map((step, i) => (
-                <motion.div
-                  key={step.label}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 2.1 + i * 0.15, duration: 0.35 }}
-                  className="flex items-start gap-3 rounded-lg bg-slate-800/50 p-3"
-                >
-                  <span className={`mt-0.5 ${kindColor[step.kind]}`}>
-                    <StepIcon kind={step.kind} />
-                  </span>
-                  <div>
-                    <p className="text-sm font-medium text-white">{step.label}</p>
-                    <p className={`mt-0.5 font-mono text-xs ${kindColor[step.kind]}`}>{step.detail}</p>
+          <AnimatePresence mode="wait">
+            {phase === 0 ? (
+              // Typing indicator — three dots breathing in sequence.
+              <motion.div
+                key="typing"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="flex h-5 items-center gap-1"
+                aria-label="Nimbus is thinking"
+              >
+                {[0, 1, 2].map((i) => (
+                  <motion.span
+                    key={i}
+                    className="h-1.5 w-1.5 rounded-full bg-slate-500"
+                    animate={{ opacity: [0.3, 1, 0.3], y: [0, -2, 0] }}
+                    transition={{ duration: 0.9, repeat: Infinity, delay: i * 0.15, ease: "easeInOut" }}
+                  />
+                ))}
+              </motion.div>
+            ) : (
+              <motion.div
+                key="reply"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.35 }}
+              >
+                <p>Here is a plan that fits a small, low-traffic API.</p>
+                <div className="mt-3 rounded-xl border border-ion-500/20 bg-ion-500/5 p-4">
+                  <div className="space-y-2">
+                    {planSteps.map((step, i) => (
+                      <motion.div
+                        key={step.label}
+                        initial={false}
+                        animate={
+                          i < stepsShown
+                            ? { opacity: 1, x: 0, height: "auto", marginTop: i === 0 ? 0 : undefined }
+                            : { opacity: 0, x: -8, height: 0, marginTop: 0 }
+                        }
+                        transition={{ duration: 0.3, ease: "easeOut" }}
+                        style={{ overflow: "hidden" }}
+                        className="flex items-start gap-3 rounded-lg bg-slate-800/50 p-3"
+                      >
+                        <span className={`mt-0.5 ${kindColor[step.kind]}`}>
+                          <StepIcon kind={step.kind} />
+                        </span>
+                        <div>
+                          <p className="text-sm font-medium text-white">{step.label}</p>
+                          <p className={`mt-0.5 font-mono text-xs ${kindColor[step.kind]}`}>{step.detail}</p>
+                        </div>
+                      </motion.div>
+                    ))}
                   </div>
-                </motion.div>
-              ))}
-            </div>
-            <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
-              <span>
-                Est. cost: <span className="text-slate-300">$0/mo (free tier)</span>
-              </span>
-              <button className="rounded-lg bg-ion-700 px-3 py-1.5 text-xs font-semibold text-white">
-                Deploy
-              </button>
-            </div>
-          </div>
+                  <motion.div
+                    initial={false}
+                    animate={{ opacity: phase >= LAST_PHASE ? 1 : 0.35 }}
+                    transition={{ duration: 0.3 }}
+                    className="mt-3 flex items-center justify-between text-xs text-slate-500"
+                  >
+                    <span>
+                      Est. cost: <span className="text-slate-300">$0/mo (free tier)</span>
+                    </span>
+                    <motion.button
+                      className="rounded-lg bg-ion-700 px-3 py-1.5 text-xs font-semibold text-white"
+                      animate={
+                        phase >= LAST_PHASE && !reduce
+                          ? { boxShadow: ["0 0 0 0 rgba(46,158,224,0.5)", "0 0 0 8px rgba(46,158,224,0)"] }
+                          : {}
+                      }
+                      transition={{ duration: 1.6, repeat: Infinity, ease: "easeOut" }}
+                    >
+                      Deploy
+                    </motion.button>
+                  </motion.div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
-      </motion.div>
+      </div>
     </motion.div>
   );
 }

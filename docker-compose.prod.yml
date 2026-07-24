@@ -59,6 +59,15 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # Override the backend image's HTTP HEALTHCHECK — the worker serves no HTTP,
+    # so that probe would fail forever. Its real liveness dependency is Redis
+    # (the patrol loop and token buckets live there); ping it via redis-py.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,redis; redis.from_url(os.environ['REDIS_URL']).ping()"]
+      interval: 30s
+      timeout: 3s
+      start_period: 40s
+      retries: 3
 
   redis:
     image: redis:7-alpine
