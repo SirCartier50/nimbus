@@ -75,7 +75,7 @@ export default function AWSGate({ children }: AWSGateProps) {
           </p>
           <button
             onClick={() => window.location.reload()}
-            className="mt-6 rounded-xl bg-ion-700 px-6 py-2.5 text-sm font-semibold text-white transition hover:brightness-110"
+            className="mt-6 btn-ion rounded-xl px-6 py-2.5 text-sm font-semibold text-white"
           >
             Retry
           </button>
@@ -142,7 +142,7 @@ export default function AWSGate({ children }: AWSGateProps) {
 
           <Link
             href="/settings"
-            className="mt-8 inline-block rounded-2xl bg-ion-700 px-8 py-3.5 text-base font-semibold text-white shadow-xl shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
+            className="btn-ion mt-8 inline-block rounded-2xl px-8 py-3.5 text-base font-semibold text-white"
           >
             Connect AWS Account
           </Link>

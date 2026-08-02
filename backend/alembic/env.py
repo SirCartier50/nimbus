@@ -61,6 +61,16 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
+# Migrations are the container's release step (see docker-compose.yml), so a DB
+# that isn't reachable *yet* would crash the backend and hand it to Docker's
+# restart loop. That happens routinely: a Supabase pooler answering
+# `(ENOTFOUND) tenant/user ... not found` while the project wakes, or Postgres
+# still booting in a fresh compose stack. Retry the CONNECT with backoff; a
+# failure inside a migration is a real bug and still aborts immediately.
+_CONNECT_ATTEMPTS = 6
+_CONNECT_BACKOFF = 3.0  # seconds; ~45s total before giving up
+
+
 async def run_async_migrations() -> None:
     """Run migrations using an async engine (driver is asyncpg, not psycopg2)."""
     connectable = async_engine_from_config(
@@ -69,10 +79,29 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
+    try:
+        for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+            try:
+                connection_cm = connectable.connect()
+                connection = await connection_cm.__aenter__()
+                break
+            except Exception as e:
+                if attempt == _CONNECT_ATTEMPTS:
+                    raise
+                delay = _CONNECT_BACKOFF * attempt
+                print(
+                    f"alembic: database not reachable ({type(e).__name__}: {e}); "
+                    f"retrying in {delay:.0f}s [{attempt}/{_CONNECT_ATTEMPTS - 1}]",
+                    flush=True,
+                )
+                await asyncio.sleep(delay)
 
-    await connectable.dispose()
+        try:
+            await connection.run_sync(do_run_migrations)
+        finally:
+            await connection_cm.__aexit__(None, None, None)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:

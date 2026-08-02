@@ -34,7 +34,7 @@ export default function NotFound() {
         <div className="mt-8 flex items-center justify-center gap-4">
           <Link
             href="/"
-            className="rounded-xl bg-ion-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:brightness-110 active:scale-[0.97]"
+            className="btn-ion rounded-xl px-6 py-2.5 text-sm font-semibold text-white"
           >
             Go Home
           </Link>

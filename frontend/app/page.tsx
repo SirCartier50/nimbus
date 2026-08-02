@@ -32,22 +32,44 @@ const scaleIn = {
 
 // ── Agent data ────────────────────────────────────────────────────────────
 
+// Each agent owns a hue across the cold spectrum (teal → blue → violet) so the
+// three cards read as three distinct roles instead of one accent at three
+// opacities. The hue is the identity: it follows each agent wherever it
+// appears, it isn't decoration on the card.
 const agents = [
   {
     title: "Architect",
     Icon: ArchitectIcon,
+    accent: {
+      text: "text-ion-400",
+      chip: "bg-ion-500/10",
+      border: "border-ion-500/20",
+      hover: "hover:border-ion-400/45",
+    },
     description:
       "Translates your plain English into production-ready AWS architecture. Need to stay within free tier? Just say so, and it adapts to your constraints and budget.",
   },
   {
     title: "Executor",
     Icon: ExecutorIcon,
+    accent: {
+      text: "text-frost-400",
+      chip: "bg-frost-500/10",
+      border: "border-frost-500/20",
+      hover: "hover:border-frost-400/45",
+    },
     description:
       "Once you approve the plan, Executor provisions real AWS resources: EC2 instances, S3 buckets, DynamoDB tables, Lambda functions, deployed in seconds, not hours.",
   },
   {
     title: "Bodyguard",
     Icon: BodyguardIcon,
+    accent: {
+      text: "text-iris-400",
+      chip: "bg-iris-500/10",
+      border: "border-iris-500/20",
+      hover: "hover:border-iris-400/45",
+    },
     description:
       "Runs 24/7 in the background. Monitors resource usage, auto-stops idle instances, and tracks your spending against budget limits. No surprise bills.",
   },
@@ -65,10 +87,12 @@ function ChatPreview() {
   ];
 
   // Each resource kind gets its own token color, like syntax highlighting —
-  // not everything rendered in the same flat gray.
+  // not everything rendered in the same flat gray. All three sit in the cold
+  // spectrum (violet/teal/blue) so the preview stays in the page's temperature
+  // instead of dropping a warm amber into it.
   const kindColor: Record<"fn" | "db" | "s3", string> = {
-    fn: "text-amber-400",
-    db: "text-emerald-400",
+    fn: "text-iris-400",
+    db: "text-frost-400",
     s3: "text-ion-400",
   };
 
@@ -196,7 +220,9 @@ function ChatPreview() {
                       Est. cost: <span className="text-slate-300">$0/mo (free tier)</span>
                     </span>
                     <motion.button
-                      className="rounded-lg bg-ion-700 px-3 py-1.5 text-xs font-semibold text-white"
+                      /* Not .btn-ion: the pulse below animates box-shadow
+                         inline, which would clobber its layered shadow. */
+                      className="rounded-lg border border-ion-400/25 bg-gradient-to-br from-ion-800 to-iris-700 px-3 py-1.5 text-xs font-semibold text-white"
                       animate={
                         phase >= LAST_PHASE && !reduce
                           ? { boxShadow: ["0 0 0 0 rgba(46,158,224,0.5)", "0 0 0 8px rgba(46,158,224,0)"] }
@@ -262,7 +288,7 @@ export default function HeroPage() {
             </Link>
             <Link
               href="/login"
-              className="rounded-full bg-ion-700 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
+              className="btn-ion rounded-full px-5 py-2 text-sm font-semibold text-white"
             >
               Start Building
             </Link>
@@ -320,14 +346,14 @@ export default function HeroPage() {
           >
             <Link
               href="/login"
-              className="group inline-flex items-center gap-2 rounded-full bg-ion-700 px-7 py-3.5 text-base font-semibold text-white shadow-lg shadow-ion-500/25 transition hover:brightness-110 active:scale-[0.97]"
+              className="btn-ion group inline-flex items-center gap-2 rounded-full px-7 py-3.5 text-base font-semibold text-white"
             >
               Start Building
               <ArrowRight size={18} weight="bold" className="transition-transform group-hover:translate-x-0.5" />
             </Link>
             <a
               href="#agents"
-              className="group inline-flex items-center gap-2 rounded-full border border-slate-700 px-7 py-3.5 text-base font-medium text-slate-300 transition hover:border-slate-500 hover:text-white active:scale-[0.97]"
+              className="btn-cold group inline-flex items-center gap-2 rounded-full px-7 py-3.5 text-base font-medium text-slate-300 hover:text-white"
             >
               How It Works
               <ArrowRight size={18} weight="bold" className="transition-transform group-hover:translate-x-0.5" />
@@ -387,9 +413,9 @@ export default function HeroPage() {
                 initial="hidden"
                 whileInView="visible"
                 viewport={{ once: true }}
-                className="group glass rounded-2xl border-ion-500/20 p-10 transition-all duration-300 hover:border-ion-400/40 glow-blue-hover md:col-span-3"
+                className={`group glass glow-blue-hover rounded-2xl p-10 transition-colors duration-300 md:col-span-3 ${featured.accent.border} ${featured.accent.hover}`}
               >
-                <div className="mb-6 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-ion-500/10 text-ion-400 shadow-lg transition-shadow group-hover:shadow-ion-500/20">
+                <div className={`mb-6 inline-flex h-16 w-16 items-center justify-center rounded-2xl shadow-lg ${featured.accent.chip} ${featured.accent.text}`}>
                   <FeaturedIcon size={32} />
                 </div>
                 <h3 className="font-display mb-3 text-2xl font-semibold text-white">
@@ -411,9 +437,9 @@ export default function HeroPage() {
                 initial="hidden"
                 whileInView="visible"
                 viewport={{ once: true }}
-                className="group glass flex-1 rounded-2xl border-ion-500/20 p-6 transition-all duration-300 hover:border-ion-400/40 glow-blue-hover"
+                className={`group glass glow-blue-hover flex-1 rounded-2xl p-6 transition-colors duration-300 ${agent.accent.border} ${agent.accent.hover}`}
               >
-                <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-ion-500/10 text-ion-400 shadow-lg transition-shadow group-hover:shadow-ion-500/20">
+                <div className={`mb-4 inline-flex h-11 w-11 items-center justify-center rounded-xl shadow-lg ${agent.accent.chip} ${agent.accent.text}`}>
                   <agent.Icon size={22} />
                 </div>
                 <h3 className="mb-2 text-lg font-semibold text-white">
@@ -444,7 +470,9 @@ export default function HeroPage() {
 
         <div className="relative space-y-12">
           {/* Connecting line */}
-          <div className="absolute left-8 top-0 hidden h-full w-px bg-ion-500/40 sm:block" />
+          {/* The connector traverses the same cold spectrum the steps do, so
+              the gradient reads as progress through the flow. */}
+          <div className="absolute left-8 top-0 hidden h-full w-px bg-gradient-to-b from-frost-500/40 via-ion-500/40 to-iris-500/40 sm:block" />
 
           {[
             {
@@ -476,7 +504,7 @@ export default function HeroPage() {
               transition={{ delay: i * 0.1, duration: 0.5 }}
               className="flex items-start gap-6"
             >
-              <div className="relative z-10 flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-ion-700 text-lg font-bold text-white shadow-lg shadow-ion-500/25">
+              <div className="btn-ion relative z-10 flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl font-mono text-lg font-bold text-white">
                 {item.step}
               </div>
               <div className="pt-2">
@@ -503,14 +531,17 @@ export default function HeroPage() {
           whileInView={{ opacity: 1, scale: 1 }}
           viewport={{ once: true }}
           transition={{ duration: 0.5 }}
-          className="bg-grain relative overflow-hidden rounded-3xl bg-gradient-to-br from-ion-500 to-ion-700 px-8 py-16"
+          /* Spans the full cold spectrum — teal into blue into violet — so the
+             page's one bold moment is the whole palette at once, not a single
+             hue at full saturation. */
+          className="bg-grain relative overflow-hidden rounded-3xl bg-gradient-to-br from-frost-600 via-ion-600 to-iris-600 px-8 py-16"
         >
           <h2 className="font-display relative z-[1] text-3xl font-bold text-white sm:text-4xl">
             Ready to deploy your first resource?
           </h2>
           <Link
             href="/login"
-            className="relative z-[1] mt-8 inline-block rounded-2xl bg-white px-10 py-4 text-lg font-semibold text-ion-700 shadow-xl transition hover:brightness-95 active:scale-[0.97]"
+            className="relative z-[1] mt-8 inline-block rounded-2xl bg-frost-300 px-10 py-4 text-lg font-semibold text-ion-950 shadow-xl transition hover:bg-frost-400 active:scale-[0.97]"
           >
             Start Building
           </Link>

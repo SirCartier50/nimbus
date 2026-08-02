@@ -324,7 +324,7 @@ export default function SettingsPage() {
               <button
                 onClick={saveAWS}
                 disabled={awsSaving || !awsConfig.role_arn}
-                className="w-full rounded-xl bg-gradient-to-r from-ion-500 to-ion-400 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:brightness-110 disabled:opacity-40"
+                className="btn-ion w-full rounded-xl py-2.5 text-sm font-semibold text-white disabled:opacity-40"
               >
                 {awsSaving ? "Connecting..." : "Connect AWS Account"}
               </button>

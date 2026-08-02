@@ -206,7 +206,7 @@ function PlanCard({
             </button>
             <button
               onClick={onConfirm}
-              className="rounded-lg bg-gradient-to-r from-ion-500 to-ion-400 px-6 py-2 text-sm font-semibold text-white shadow-md shadow-ion-500/20 transition hover:brightness-110 active:scale-[0.97]"
+              className="btn-ion rounded-lg px-6 py-2 text-sm font-semibold text-white"
             >
               Deploy plan
             </button>
@@ -1062,7 +1062,7 @@ export default function ChatPage() {
                 <button
                   type="submit"
                   disabled={loading || !input.trim()}
-                  className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-r from-ion-500 to-ion-400 text-white shadow-md shadow-ion-500/20 transition hover:brightness-110 active:scale-[0.93] disabled:active:scale-100 disabled:opacity-30"
+                  className="btn-ion flex h-8 w-8 items-center justify-center rounded-lg text-white disabled:opacity-30"
                 >
                   <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 19.5l15-7.5-15-7.5v6l10 1.5-10 1.5v6z" />

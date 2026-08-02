@@ -1,13 +1,18 @@
 ﻿"use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import Navbar from "../components/Navbar";
 import AWSGate from "../components/AWSGate";
+import ConnectionError from "../components/ConnectionError";
 import { useAuthFetch } from "../lib/useAuthFetch";
 
 const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
+
+// Dashboard poll interval. Shared with ConnectionError so the countdown it
+// shows is the real one.
+const POLL_SECONDS = 10;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -451,24 +456,26 @@ export default function DashboardPage() {
   const [costDetails, setCostDetails] = useState<CostDetails | null>(null);
   const [costLoading, setCostLoading] = useState(false);
 
-  useEffect(() => {
-    const fetchDash = async () => {
-      try {
-        const res = await authFetch(`${API}/dashboard`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        setDashboard(await res.json());
-        setError(null);
-      } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Cannot reach backend");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchDash();
-    const id = setInterval(fetchDash, 10_000);
-    return () => clearInterval(id);
+  // Also drives the "checking again in Ns" countdown in ConnectionError, so the
+  // two can't drift apart.
+  const refresh = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/dashboard`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setDashboard(await res.json());
+      setError(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "The backend did not respond.");
+    } finally {
+      setLoading(false);
+    }
   }, [authFetch]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, POLL_SECONDS * 1000);
+    return () => clearInterval(id);
+  }, [refresh]);
 
   const handleSelectResource = async (resource: Resource) => {
     if (selectedResource === resource.id) {
@@ -516,7 +523,7 @@ export default function DashboardPage() {
           </div>
           <Link
             href="/chat"
-            className="rounded-xl bg-gradient-to-r from-ion-500 to-ion-400 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:shadow-ion-500/35 hover:brightness-110"
+            className="btn-ion rounded-xl px-5 py-2.5 text-sm font-semibold text-white"
           >
             + Deploy New
           </Link>
@@ -524,17 +531,11 @@ export default function DashboardPage() {
 
         {/* Error state */}
         {error && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="mb-8 rounded-xl border border-red-500/20 bg-red-500/5 p-6"
-          >
-            <p className="font-medium text-red-400">Cannot reach backend</p>
-            <p className="mt-1 text-sm text-red-400/70">{error}</p>
-            <p className="mt-3 text-xs text-red-400/50 font-mono">
-              cd nimbus/backend && uvicorn main:app --reload --port 8000
-            </p>
-          </motion.div>
+          <ConnectionError
+            detail={error}
+            onRetry={refresh}
+            retryInSeconds={POLL_SECONDS}
+          />
         )}
 
         {/* Loading state */}
@@ -601,7 +602,7 @@ export default function DashboardPage() {
                     </p>
                     <Link
                       href="/chat"
-                      className="mt-6 rounded-xl bg-gradient-to-r from-ion-500 to-ion-400 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-ion-500/20 transition hover:brightness-110"
+                      className="btn-ion mt-6 rounded-xl px-6 py-2.5 text-sm font-semibold text-white"
                     >
                       Start Building
                     </Link>
