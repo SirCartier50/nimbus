@@ -18,11 +18,16 @@ from utils.llm.bedrock import FALLBACK_MODEL_IDS, NOVA_MODEL_ID, BedrockProvider
 __all__ = ["run_tool_loop", "run_completion", "get_provider", "NOVA_MODEL_ID", "FALLBACK_MODEL_IDS"]
 
 
-def get_provider(name: str = None):
+def get_provider(name: str = None, api_key: str = None, model: str = None):
+    """`api_key`, when given, overrides the shared operator env var — this is how
+    a user's own key (routes/chat.py's _resolve_provider, decrypted from
+    UserSettings.provider_keys_enc) gets used for their turn instead of the
+    server-wide credential. `model` similarly overrides the <PROVIDER>_MODEL env
+    var / config.MODEL_DEFAULTS default (UserSettings.provider_models)."""
     # Default is OpenRouter, NOT Bedrock: the bedrock default silently routed
     # every provider-less call (Bodyguard patrols, unset LLM_PROVIDER) to Nova
     # on the operator's AWS bill. Bedrock remains constructible here for ops/
-    # tests, but it is no longer user-selectable (not in chat.KNOWN_PROVIDERS).
+    # tests, but it is no longer user-selectable (not in config.KNOWN_PROVIDERS).
     name = (name or os.getenv("LLM_PROVIDER", "openrouter")).lower()
 
     if name == "bedrock":
@@ -31,19 +36,19 @@ def get_provider(name: str = None):
     if name == "groq":
         from utils.llm.openai_compat import OpenAICompatProvider
 
-        key = os.getenv("GROQ_API_KEY")
+        key = api_key or os.getenv("GROQ_API_KEY")
         if not key:
             raise ValueError("GROQ_API_KEY is not set")
         return OpenAICompatProvider(
             base_url="https://api.groq.com/openai/v1",
             api_key=key,
-            model=os.getenv("GROQ_MODEL", MODEL_DEFAULTS["groq"]),
+            model=model or os.getenv("GROQ_MODEL", MODEL_DEFAULTS["groq"]),
         )
 
     if name == "openrouter":
         from utils.llm.openai_compat import OpenAICompatProvider
 
-        key = os.getenv("OPENROUTER_API_KEY")
+        key = api_key or os.getenv("OPENROUTER_API_KEY")
         if not key:
             raise ValueError("OPENROUTER_API_KEY is not set")
         return OpenAICompatProvider(
@@ -51,13 +56,13 @@ def get_provider(name: str = None):
             # OpenAI-compatible mock instead of the real (paid) endpoint.
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             api_key=key,
-            model=os.getenv("OPENROUTER_MODEL", MODEL_DEFAULTS["openrouter"]),
+            model=model or os.getenv("OPENROUTER_MODEL", MODEL_DEFAULTS["openrouter"]),
         )
 
     if name in ("huggingface", "hf"):
         from utils.llm.openai_compat import OpenAICompatProvider
 
-        key = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")
+        key = api_key or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")
         if not key:
             raise ValueError("HF_TOKEN is not set")
         # HuggingFace Inference Providers expose an OpenAI-compatible router, so the same
@@ -67,7 +72,7 @@ def get_provider(name: str = None):
         return OpenAICompatProvider(
             base_url="https://router.huggingface.co/v1",
             api_key=key,
-            model=os.getenv("HF_MODEL", MODEL_DEFAULTS["huggingface"]),
+            model=model or os.getenv("HF_MODEL", MODEL_DEFAULTS["huggingface"]),
         )
 
     raise ValueError(

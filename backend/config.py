@@ -27,6 +27,21 @@ MODEL_DEFAULTS = {
     "huggingface": "deepseek-ai/DeepSeek-V3-0324",
 }
 
+# Providers selectable in the frontend (model switcher, per-user API key
+# settings). Bedrock is a real get_provider() option but deliberately excluded
+# here — it billed the operator's AWS account invisibly. Single source of
+# truth so routes/chat.py and routes/settings.py can't drift apart.
+KNOWN_PROVIDERS = set(MODEL_DEFAULTS)
+
+def operator_key_configured(provider: str) -> bool:
+    """Whether the shared, server-wide key for this provider is set (as opposed
+    to a per-user key in UserSettings.provider_keys_enc). Mirrors the lookup
+    each get_provider() branch does internally."""
+    if provider == "huggingface":
+        return bool(os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY"))
+    env_name = {"groq": "GROQ_API_KEY", "openrouter": "OPENROUTER_API_KEY"}.get(provider)
+    return bool(env_name and os.getenv(env_name))
+
 # Vars without which the process cannot do its job at all.
 _REQUIRED_COMMON = {
     "DATABASE_URL": "Postgres connection string (postgresql+asyncpg://...)",
@@ -42,6 +57,7 @@ _REQUIRED_BY_ROLE = {
 _RECOMMENDED = {
     "OPENROUTER_API_KEY": "the default LLM provider — chat turns will error until a provider key exists",
     "REDIS_URL": "shared rate limits/caches across workers — absent, each process keeps its own",
+    "SETTINGS_ENCRYPTION_KEY": "Settings > API Keys will 503 instead of storing users' own provider keys",
 }
 
 # Every numeric tunable: (env name, parser). A typo'd value should fail loudly

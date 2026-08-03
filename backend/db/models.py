@@ -36,6 +36,16 @@ class UserSettings(Base):
     aws_role_arn: Mapped[str | None] = mapped_column(String, nullable=True)
     aws_external_id: Mapped[str | None] = mapped_column(String, nullable=True)
     github_repo_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # {provider_name: fernet_ciphertext} for a user's own LLM provider keys (see
+    # utils/secret_box.py). Unlike the AWS fields above, these ARE secrets — a
+    # leaked key lets someone spend the user's own provider quota. Reassign the
+    # whole dict rather than mutating it in place (matches Session.ui_messages)
+    # so SQLAlchemy's change-tracking on the JSONB column actually picks it up.
+    provider_keys_enc: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # {provider_name: model_id} — which model a user's turns run on per provider,
+    # overriding config.MODEL_DEFAULTS / the <PROVIDER>_MODEL env var. Not a
+    # secret (a model id isn't sensitive), so plain JSONB like the AWS fields.
+    provider_models: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
     user: Mapped["User"] = relationship(back_populates="settings")

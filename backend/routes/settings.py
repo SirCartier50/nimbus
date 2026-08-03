@@ -2,14 +2,16 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import KNOWN_PROVIDERS, MODEL_DEFAULTS, operator_key_configured
 from db.crud import get_or_create_user, get_user_settings
 from db.deps import get_db
 from db.models import UserSettings
 from utils.aws_clients import get_sts_client
 from utils.aws_role import assume_role, generate_external_id
+from utils.secret_box import SecretBoxNotConfigured, encrypt_secret
 
 router = APIRouter()
 
@@ -28,6 +30,14 @@ class AWSRoleConnection(BaseModel):
 
 class GitHubConfig(BaseModel):
     repo_url: str
+
+
+class ApiKeyBody(BaseModel):
+    key: str = Field(..., min_length=1, max_length=512)
+
+
+class ModelBody(BaseModel):
+    model: str = Field(..., min_length=1, max_length=256)
 
 
 async def _get_or_create_settings(db: AsyncSession, user_id) -> UserSettings:
@@ -116,3 +126,109 @@ async def unlink_github_repo(request: Request, db: AsyncSession = Depends(get_db
         settings.github_repo_url = None
         await db.commit()
     return {"connected": False, "repo_url": None}
+
+
+def _key_status(provider: str, enc: dict) -> dict:
+    ciphertext = enc.get(provider)
+    if ciphertext:
+        # Masked from the ciphertext's own length, not the plaintext's — avoids
+        # decrypting just to render a status list nobody asked to reveal.
+        return {"source": "user", "configured": True, "masked": f"····{ciphertext[-4:]}"}
+    if operator_key_configured(provider):
+        return {"source": "operator", "configured": True, "masked": None}
+    return {"source": None, "configured": False, "masked": None}
+
+
+@router.get("/settings/api-keys")
+async def get_api_keys(request: Request, db: AsyncSession = Depends(get_db)):
+    """Per-provider status only — the plaintext key is never sent back down
+    after it's stored. `source` tells the UI whether a turn on that provider
+    runs on the user's own key or the shared operator one."""
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await get_user_settings(db, user.id)
+    enc = (settings.provider_keys_enc if settings else None) or {}
+    return {provider: _key_status(provider, enc) for provider in sorted(KNOWN_PROVIDERS)}
+
+
+@router.put("/settings/api-keys/{provider}")
+async def set_api_key(provider: str, body: ApiKeyBody, request: Request, db: AsyncSession = Depends(get_db)):
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{provider}'")
+
+    try:
+        ciphertext = encrypt_secret(body.key.strip())
+    except SecretBoxNotConfigured as e:
+        # Fail closed rather than falling back to storing the key in plaintext.
+        raise HTTPException(status_code=503, detail=str(e))
+
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await _get_or_create_settings(db, user.id)
+    # Reassigned, not mutated in place — see the field comment on
+    # UserSettings.provider_keys_enc for why that matters here.
+    settings.provider_keys_enc = {**(settings.provider_keys_enc or {}), provider: ciphertext}
+    await db.commit()
+
+    return {provider: _key_status(provider, settings.provider_keys_enc)}
+
+
+@router.delete("/settings/api-keys/{provider}")
+async def delete_api_key(provider: str, request: Request, db: AsyncSession = Depends(get_db)):
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{provider}'")
+
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await get_user_settings(db, user.id)
+    if settings and provider in (settings.provider_keys_enc or {}):
+        settings.provider_keys_enc = {k: v for k, v in settings.provider_keys_enc.items() if k != provider}
+        await db.commit()
+        enc = settings.provider_keys_enc
+    else:
+        enc = (settings.provider_keys_enc if settings else None) or {}
+
+    return {provider: _key_status(provider, enc)}
+
+
+def _model_status(provider: str, overrides: dict) -> dict:
+    default = MODEL_DEFAULTS[provider]
+    override = overrides.get(provider)
+    return {"model": override or default, "is_custom": override is not None, "default": default}
+
+
+@router.get("/settings/models")
+async def get_models(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await get_user_settings(db, user.id)
+    overrides = (settings.provider_models if settings else None) or {}
+    return {provider: _model_status(provider, overrides) for provider in sorted(KNOWN_PROVIDERS)}
+
+
+@router.put("/settings/models/{provider}")
+async def set_model(provider: str, body: ModelBody, request: Request, db: AsyncSession = Depends(get_db)):
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{provider}'")
+
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await _get_or_create_settings(db, user.id)
+    # Reassigned, not mutated in place — see the field comment on
+    # UserSettings.provider_models for why that matters here.
+    settings.provider_models = {**(settings.provider_models or {}), provider: body.model.strip()}
+    await db.commit()
+
+    return {provider: _model_status(provider, settings.provider_models)}
+
+
+@router.delete("/settings/models/{provider}")
+async def reset_model(provider: str, request: Request, db: AsyncSession = Depends(get_db)):
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{provider}'")
+
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await get_user_settings(db, user.id)
+    if settings and provider in (settings.provider_models or {}):
+        settings.provider_models = {k: v for k, v in settings.provider_models.items() if k != provider}
+        await db.commit()
+        overrides = settings.provider_models
+    else:
+        overrides = (settings.provider_models if settings else None) or {}
+
+    return {provider: _model_status(provider, overrides)}

@@ -13,20 +13,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from budget import consume_daily_turn, seconds_until_utc_midnight
-from db.crud import get_or_create_user
+from config import KNOWN_PROVIDERS, operator_key_configured
+from db.crud import get_or_create_user, get_user_settings
 from db.deps import get_db
 from db.engine import async_session_local
 from db.models import Deployment, Session as SessionModel
 from pipeline.orchestrator import run_turn, stream_turn
 from pipeline.state import PipelineState
+from utils.llm import get_provider
+from utils.secret_box import SecretBoxNotConfigured, decrypt_secret
 from utils.user_aws import get_user_boto3_session
 
 router = APIRouter()
-
-# Providers a user can pick in the frontend's model selector — kept in sync with
-# utils.llm.get_provider()'s accepted names. Bedrock is deliberately excluded:
-# it billed the operator's AWS account invisibly and is no longer offered.
-KNOWN_PROVIDERS = {"groq", "openrouter", "huggingface"}
 
 # Chat turns block a thread for their full duration (LLM + boto3 are synchronous,
 # and a deploy can run for many minutes). They get their OWN bounded executor so
@@ -113,9 +111,36 @@ async def _load_session(db: AsyncSession, user, req: ChatRequest) -> SessionMode
     return session
 
 
-def _build_state(user, session, req: ChatRequest, aws_session) -> PipelineState:
+async def _resolve_provider(db: AsyncSession, user, provider_name: Optional[str]):
+    """A string provider name normally reaches get_provider() unresolved and it
+    reads the shared operator key/model from the environment. If this user has
+    their own key (Settings > API Keys) and/or model override (Settings > Model
+    Configurations) for that provider, build the real provider instance here
+    instead, so their turn runs on their own key/quota and chosen model. Returns
+    the plain name (or None) when there's nothing to swap in — get_provider()
+    already knows how to turn that into the operator-default path."""
+    if provider_name not in KNOWN_PROVIDERS:
+        return provider_name
+    settings = await get_user_settings(db, user.id)
+    ciphertext = ((settings.provider_keys_enc if settings else None) or {}).get(provider_name)
+    model = ((settings.provider_models if settings else None) or {}).get(provider_name)
+    if not ciphertext and not model:
+        return provider_name
+    api_key = None
+    if ciphertext:
+        try:
+            api_key = decrypt_secret(ciphertext)
+        except SecretBoxNotConfigured:
+            # Encryption key rotated/missing since this was stored — fall back to
+            # the operator key rather than failing the whole turn.
+            api_key = None
+    return get_provider(provider_name, api_key=api_key, model=model)
+
+
+async def _build_state(db: AsyncSession, user, session, req: ChatRequest, aws_session) -> PipelineState:
     # Rehydrate any pending plan from the session row so a confirmation resumes exactly
     # where the proposal left off.
+    provider = await _resolve_provider(db, user, req.provider if req.provider in KNOWN_PROVIDERS else None)
     return PipelineState(
         user_id=str(user.id),
         session_id=str(session.id),
@@ -123,7 +148,7 @@ def _build_state(user, session, req: ChatRequest, aws_session) -> PipelineState:
         history=session.history or [],
         free_tier_mode=req.free_tier_mode,
         aws_session=aws_session,
-        provider=req.provider if req.provider in KNOWN_PROVIDERS else None,
+        provider=provider,
         confirm=req.confirm,
         pending_plan=session.pending_plan,
         plan_is_destructive=session.plan_is_destructive,
@@ -269,17 +294,17 @@ async def _finalize_turn(db: AsyncSession, user, session: SessionModel, state: P
 
 
 @router.get("/chat/providers")
-async def list_providers():
-    """Which of KNOWN_PROVIDERS this server can actually serve right now. The
-    frontend's model selector used to offer all three unconditionally, so picking
-    one whose key was never set (e.g. HF_TOKEN) failed deep inside a chat turn
-    with a raw ValueError instead of steering the user away from it up front."""
-    configured = {
-        "groq": bool(os.getenv("GROQ_API_KEY")),
-        "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
-        "huggingface": bool(os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")),
-    }
-    return {"providers": configured}
+async def list_providers(request: Request, db: AsyncSession = Depends(get_db)):
+    """Which of KNOWN_PROVIDERS this user can actually use right now — either
+    the shared operator key or their own (Settings > API Keys). The frontend's
+    model selector used to offer all three unconditionally, so picking one with
+    no key anywhere failed deep inside a chat turn with a raw ValueError instead
+    of steering the user away from it up front."""
+    user = await get_or_create_user(db, request.state.user_id)
+    settings = await get_user_settings(db, user.id)
+    user_keys = (settings.provider_keys_enc if settings else None) or {}
+    available = {name: operator_key_configured(name) or name in user_keys for name in KNOWN_PROVIDERS}
+    return {"providers": available}
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -288,7 +313,7 @@ async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(ge
     await _spend_turn_budget(user)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
-    state = _build_state(user, session, req, aws_session)
+    state = await _build_state(db, user, session, req, aws_session)
 
     # The agents block on Bedrock/boto3 — run the whole turn in the dedicated
     # turn executor so it doesn't stall the event loop or the default thread pool.
@@ -346,7 +371,7 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
     await _spend_turn_budget(user)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
-    state = _build_state(user, session, req, aws_session)
+    state = await _build_state(db, user, session, req, aws_session)
 
     if _turn_slots.locked():
         raise HTTPException(status_code=503, detail=_AT_CAPACITY, headers={"Retry-After": "30"})

@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 
 from db.models import UserSettings
@@ -102,3 +103,128 @@ async def test_set_and_get_github_repo(client):
 
     resp = await client.get("/api/settings/github")
     assert resp.json() == {"connected": True, "repo_url": "https://github.com/foo/bar"}
+
+
+@pytest.fixture
+def encryption_key(monkeypatch):
+    """utils.secret_box._fernet() is lru_cache'd, so a key set via monkeypatch
+    after the first call would be silently ignored — clear it on both sides."""
+    import utils.secret_box as secret_box
+
+    monkeypatch.setenv("SETTINGS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    secret_box._fernet.cache_clear()
+    yield
+    secret_box._fernet.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_api_keys_all_unconfigured_by_default(client, monkeypatch):
+    for var in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "HF_TOKEN", "HUGGINGFACE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    resp = await client.get("/api/settings/api-keys")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"groq", "openrouter", "huggingface"}
+    for status in body.values():
+        assert status == {"source": None, "configured": False, "masked": None}
+
+
+@pytest.mark.asyncio
+async def test_api_keys_reflects_operator_key_when_no_user_key(client, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "operator-key")
+
+    resp = await client.get("/api/settings/api-keys")
+    body = resp.json()
+    assert body["groq"] == {"source": "operator", "configured": True, "masked": None}
+
+
+@pytest.mark.asyncio
+async def test_set_api_key_rejects_unknown_provider(client, encryption_key):
+    resp = await client.put("/api/settings/api-keys/bedrock", json={"key": "whatever"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_api_key_fails_closed_without_encryption_key_configured(client, monkeypatch):
+    monkeypatch.delenv("SETTINGS_ENCRYPTION_KEY", raising=False)
+    import utils.secret_box as secret_box
+
+    secret_box._fernet.cache_clear()
+
+    resp = await client.put("/api/settings/api-keys/groq", json={"key": "gsk_livesecret"})
+    assert resp.status_code == 503
+    secret_box._fernet.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_set_get_delete_api_key_round_trip(client, db_session, encryption_key):
+    resp = await client.put("/api/settings/api-keys/groq", json={"key": "gsk_livesecret1234"})
+    assert resp.status_code == 200
+    status = resp.json()["groq"]
+    assert status["source"] == "user"
+    assert status["configured"] is True
+    # Masked, never the plaintext key or its full ciphertext
+    assert status["masked"].startswith("····")
+    assert "gsk_livesecret1234" not in resp.text
+
+    result = await db_session.execute(select(UserSettings))
+    settings = result.scalars().one()
+    stored = settings.provider_keys_enc["groq"]
+    assert stored != "gsk_livesecret1234"  # encrypted at rest, not the plaintext
+
+    resp = await client.get("/api/settings/api-keys")
+    assert resp.json()["groq"]["source"] == "user"
+
+    resp = await client.delete("/api/settings/api-keys/groq")
+    assert resp.status_code == 200
+    assert resp.json()["groq"] == {"source": None, "configured": False, "masked": None}
+
+    resp = await client.get("/api/settings/api-keys")
+    assert resp.json()["groq"]["configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_models_default_to_config_defaults(client):
+    from config import MODEL_DEFAULTS
+
+    resp = await client.get("/api/settings/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"groq", "openrouter", "huggingface"}
+    for provider, default in MODEL_DEFAULTS.items():
+        assert body[provider] == {"model": default, "is_custom": False, "default": default}
+
+
+@pytest.mark.asyncio
+async def test_set_model_rejects_unknown_provider(client):
+    resp = await client.put("/api/settings/models/bedrock", json={"model": "whatever"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_and_reset_model_round_trip(client, db_session):
+    from config import MODEL_DEFAULTS
+
+    resp = await client.put("/api/settings/models/groq", json={"model": "llama-3.1-8b-instant"})
+    assert resp.status_code == 200
+    assert resp.json()["groq"] == {
+        "model": "llama-3.1-8b-instant",
+        "is_custom": True,
+        "default": MODEL_DEFAULTS["groq"],
+    }
+
+    result = await db_session.execute(select(UserSettings))
+    settings = result.scalars().one()
+    assert settings.provider_models["groq"] == "llama-3.1-8b-instant"
+
+    resp = await client.get("/api/settings/models")
+    assert resp.json()["groq"]["is_custom"] is True
+
+    resp = await client.delete("/api/settings/models/groq")
+    assert resp.status_code == 200
+    assert resp.json()["groq"] == {
+        "model": MODEL_DEFAULTS["groq"],
+        "is_custom": False,
+        "default": MODEL_DEFAULTS["groq"],
+    }

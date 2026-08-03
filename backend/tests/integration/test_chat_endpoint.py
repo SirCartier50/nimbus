@@ -296,6 +296,54 @@ async def test_list_providers_reflects_which_keys_are_actually_set(client, monke
 
 
 @pytest.mark.asyncio
+async def test_users_own_provider_key_is_used_over_the_operator_key(client, monkeypatch):
+    """The point of Settings > API Keys: once a user saves their own provider
+    key, their turns run on it instead of silently falling back to the shared
+    operator credential — that's the whole reason to store it per-user."""
+    from cryptography.fernet import Fernet
+
+    import utils.secret_box as secret_box
+
+    monkeypatch.setenv("SETTINGS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    secret_box._fernet.cache_clear()
+    monkeypatch.setenv("GROQ_API_KEY", "operator-key-should-not-be-used")
+
+    put_resp = await client.put("/api/settings/api-keys/groq", json={"key": "users-own-groq-key"})
+    assert put_resp.status_code == 200
+
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="Hi!", spec=None)) as mocked_run, \
+         patch("routes.chat.get_provider") as mocked_get_provider:
+        resp = await client.post("/api/chat", json={"message": "hi", "provider": "groq"})
+
+    assert resp.status_code == 200
+    mocked_get_provider.assert_called_once_with("groq", api_key="users-own-groq-key", model=None)
+    # The provider actually handed to the agent is get_provider()'s return value,
+    # not the bare string "groq" (which would fall back to the operator env key).
+    assert mocked_run.call_args.kwargs["provider"] is mocked_get_provider.return_value
+
+    secret_box._fernet.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_users_model_override_is_used_with_no_api_key_saved(client, monkeypatch):
+    """A user can pick their own model (Settings > Model Configurations) without
+    bringing their own key — their turn should still run on the operator's
+    shared key but with the chosen model."""
+    monkeypatch.setenv("GROQ_API_KEY", "operator-key")
+
+    put_resp = await client.put("/api/settings/models/groq", json={"model": "llama-3.1-8b-instant"})
+    assert put_resp.status_code == 200
+
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="Hi!", spec=None)) as mocked_run, \
+         patch("routes.chat.get_provider") as mocked_get_provider:
+        resp = await client.post("/api/chat", json={"message": "hi", "provider": "groq"})
+
+    assert resp.status_code == 200
+    mocked_get_provider.assert_called_once_with("groq", api_key=None, model="llama-3.1-8b-instant")
+    assert mocked_run.call_args.kwargs["provider"] is mocked_get_provider.return_value
+
+
+@pytest.mark.asyncio
 async def test_unknown_provider_falls_back_to_default_instead_of_crashing(client):
     with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="Hi!", spec=None)) as mocked:
         resp = await client.post("/api/chat", json={"message": "hi", "provider": "not-a-real-provider"})
