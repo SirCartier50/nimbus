@@ -281,6 +281,21 @@ async def test_provider_choice_is_passed_through_to_agents_and_stored(client, db
 
 
 @pytest.mark.asyncio
+async def test_list_providers_reflects_which_keys_are_actually_set(client, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "y")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
+
+    resp = await client.get("/api/chat/providers")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "providers": {"groq": True, "openrouter": True, "huggingface": False}
+    }
+
+
+@pytest.mark.asyncio
 async def test_unknown_provider_falls_back_to_default_instead_of_crashing(client):
     with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="Hi!", spec=None)) as mocked:
         resp = await client.post("/api/chat", json={"message": "hi", "provider": "not-a-real-provider"})

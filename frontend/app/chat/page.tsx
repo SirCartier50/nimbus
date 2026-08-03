@@ -631,7 +631,20 @@ const PROVIDERS = [
   { value: "huggingface", label: "HuggingFace · DeepSeek V3" },
 ];
 
-function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function ModelSelector({
+  value,
+  onChange,
+  available,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  // null while still loading (nothing disabled yet, to avoid a flash of every
+  // option looking dead); once loaded, only providers with a server-side key
+  // configured are selectable — picking an unconfigured one used to fail deep
+  // inside a chat turn with a raw "HF_TOKEN is not set" error instead of being
+  // caught here, before a message is ever sent.
+  available: Record<string, boolean> | null;
+}) {
   const [open, setOpen] = useState(false);
   const current = PROVIDERS.find((p) => p.value === value) ?? PROVIDERS[0];
 
@@ -659,20 +672,30 @@ function ModelSelector({ value, onChange }: { value: string; onChange: (v: strin
               style={{ transformOrigin: "bottom left" }}
               className="absolute bottom-full left-0 z-50 mb-1.5 w-52 overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-xl"
             >
-              {PROVIDERS.map((p) => (
-                <button
-                  key={p.value}
-                  onClick={() => {
-                    onChange(p.value);
-                    setOpen(false);
-                  }}
-                  className={`block w-full px-3 py-2 text-left text-xs transition-colors duration-150 active:scale-[0.98] ${
-                    p.value === value ? "bg-ion-500/10 text-ion-300" : "text-slate-300 hover:bg-slate-800"
-                  }`}
-                >
-                  {p.label}
-                </button>
-              ))}
+              {PROVIDERS.map((p) => {
+                const disabled = available !== null && !available[p.value];
+                return (
+                  <button
+                    key={p.value}
+                    disabled={disabled}
+                    onClick={() => {
+                      if (disabled) return;
+                      onChange(p.value);
+                      setOpen(false);
+                    }}
+                    className={`block w-full px-3 py-2 text-left text-xs transition-colors duration-150 ${
+                      disabled
+                        ? "cursor-not-allowed text-slate-600"
+                        : `active:scale-[0.98] ${
+                            p.value === value ? "bg-ion-500/10 text-ion-300" : "text-slate-300 hover:bg-slate-800"
+                          }`
+                    }`}
+                  >
+                    {p.label}
+                    {disabled && <span className="ml-1.5 text-slate-700">· not configured</span>}
+                  </button>
+                );
+              })}
             </motion.div>
           </>
         )}
@@ -706,6 +729,7 @@ export default function ChatPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [freeTierMode, setFreeTierMode] = useState(true);
   const [provider, setProvider] = useState("openrouter");
+  const [providerAvailability, setProviderAvailability] = useState<Record<string, boolean> | null>(null);
   // Real pipeline progress for the in-flight turn, streamed from the backend —
   // shown live next to the typing indicator, then attached to the reply's trace.
   const [liveActivity, setLiveActivity] = useState<ActivityEntry[]>([]);
@@ -737,6 +761,23 @@ export default function ChatPage() {
     // conversation even though it's already durably saved server-side.
     const storedSessionId = localStorage.getItem("nimbus_session_id");
     if (storedSessionId) loadSession(storedSessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    authFetch(`${API}/chat/providers`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data?.providers) return;
+        setProviderAvailability(data.providers);
+        // A stored/default provider whose key was never set server-side would
+        // otherwise fail the first message sent with it — reroute up front to
+        // whichever provider actually works.
+        setProvider((current) => (data.providers[current] ? current : (
+          PROVIDERS.find((p) => data.providers[p.value])?.value ?? current
+        )));
+      })
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1058,7 +1099,7 @@ export default function ChatPage() {
                 className="max-h-40 w-full resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-sm text-white placeholder-slate-500 outline-none transition-[height] duration-100 disabled:opacity-50"
               />
               <div className="flex items-center justify-between px-1 pt-1">
-                <ModelSelector value={provider} onChange={changeProvider} />
+                <ModelSelector value={provider} onChange={changeProvider} available={providerAvailability} />
                 <button
                   type="submit"
                   disabled={loading || !input.trim()}

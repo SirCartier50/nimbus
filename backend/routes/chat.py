@@ -268,6 +268,20 @@ async def _finalize_turn(db: AsyncSession, user, session: SessionModel, state: P
     return payload
 
 
+@router.get("/chat/providers")
+async def list_providers():
+    """Which of KNOWN_PROVIDERS this server can actually serve right now. The
+    frontend's model selector used to offer all three unconditionally, so picking
+    one whose key was never set (e.g. HF_TOKEN) failed deep inside a chat turn
+    with a raw ValueError instead of steering the user away from it up front."""
+    configured = {
+        "groq": bool(os.getenv("GROQ_API_KEY")),
+        "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
+        "huggingface": bool(os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")),
+    }
+    return {"providers": configured}
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_or_create_user(db, request.state.user_id)
