@@ -12,16 +12,31 @@ import {
   CreditCard,
   UserCircle,
   Check,
-  X,
   Eye,
   EyeSlash,
   Cpu,
   ArrowCounterClockwise,
+  PencilSimple,
+  Trash,
+  Plus,
+  WarningCircle,
+  CaretDown,
 } from "@phosphor-icons/react";
 import Navbar from "../components/Navbar";
 import { useAuthFetch } from "../lib/useAuthFetch";
 
 const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api`;
+
+// Shared row/control chrome — a single flat panel per tab, divided into hairline
+// rows instead of a stack of nested boxes-within-a-box. Inspired by ChatGPT's
+// settings modal: labels + controls sit directly on the panel, separated by a
+// 1px divider, and colored "notice" boxes are replaced with inline colored text.
+const ROW = "flex items-center justify-between gap-4 py-4 border-b border-white/[0.06] last:border-0";
+const INPUT =
+  "w-full rounded-lg border border-white/10 bg-white/[0.03] px-3.5 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-ion-500/60 focus:ring-1 focus:ring-ion-500/25 font-mono";
+const ICON_BTN =
+  "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white/[0.06] hover:text-white";
+const LABEL = "text-xs font-medium uppercase tracking-wide text-slate-500";
 
 interface AWSConfig {
   role_arn: string;
@@ -101,6 +116,13 @@ export default function SettingsPage() {
   const [apiKeyReveal, setApiKeyReveal] = useState<Record<string, boolean>>({});
   const [apiKeySaving, setApiKeySaving] = useState<string | null>(null);
   const [apiKeyError, setApiKeyError] = useState<Record<string, string>>({});
+
+  // Adding a brand-new key is a separate, explicit flow from editing one that
+  // already exists — a single "+ Add key" action instead of a permanently-open
+  // input under every provider, so existing rows stay clean (masked value +
+  // edit/delete) and never get disturbed by an in-progress add.
+  const [addingKey, setAddingKey] = useState(false);
+  const [addProvider, setAddProvider] = useState<string | null>(null);
 
   const [models, setModels] = useState<Record<string, ModelStatus>>({});
   const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
@@ -220,6 +242,27 @@ export default function SettingsPage() {
     }
   };
 
+  // Providers the user hasn't brought their own key for yet — the only ones
+  // selectable from the "+ Add key" flow. Replacing an existing user key goes
+  // through the per-row Edit action instead, not this list.
+  const addableProviders = API_KEY_PROVIDERS.filter((p) => apiKeys[p.id]?.source !== "user");
+
+  const startAddKey = (providerId?: string) => {
+    const target = providerId ?? addableProviders[0]?.id;
+    if (!target) return;
+    setAddProvider(target);
+    setAddingKey(true);
+    setApiKeyError((prev) => ({ ...prev, [target]: "" }));
+  };
+
+  const cancelAddKey = () => {
+    if (addProvider) {
+      setApiKeyDrafts((prev) => ({ ...prev, [addProvider]: "" }));
+    }
+    setAddingKey(false);
+    setAddProvider(null);
+  };
+
   const saveApiKey = async (provider: string) => {
     const key = (apiKeyDrafts[provider] || "").trim();
     if (!key) return;
@@ -241,6 +284,10 @@ export default function SettingsPage() {
       setApiKeys((prev) => ({ ...prev, ...data }));
       setApiKeyDrafts((prev) => ({ ...prev, [provider]: "" }));
       setApiKeyEditing((prev) => ({ ...prev, [provider]: false }));
+      if (addingKey && addProvider === provider) {
+        setAddingKey(false);
+        setAddProvider(null);
+      }
     } catch (e: unknown) {
       setApiKeyError((prev) => ({
         ...prev,
@@ -345,7 +392,7 @@ export default function SettingsPage() {
         <div className="flex flex-col gap-6 md:flex-row">
           {/* Sidebar */}
           <nav className="shrink-0 md:w-56">
-            <ul className="flex gap-1.5 overflow-x-auto md:flex-col md:overflow-visible">
+            <ul className="flex gap-1 overflow-x-auto md:flex-col md:overflow-visible">
               {CATEGORIES.map((cat) => {
                 const Icon = cat.icon;
                 const isActive = active === cat.id;
@@ -353,10 +400,10 @@ export default function SettingsPage() {
                   <li key={cat.id} className="shrink-0 md:shrink">
                     <button
                       onClick={() => setActive(cat.id)}
-                      className={`flex w-full items-center gap-2.5 whitespace-nowrap rounded-lg border-l-2 px-3 py-2.5 text-left text-sm font-medium transition-colors duration-150 ${
+                      className={`flex w-full items-center gap-2.5 whitespace-nowrap rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors duration-150 ${
                         isActive
-                          ? "border-ion-400 bg-slate-800/60 text-white"
-                          : "border-transparent text-slate-400 hover:bg-slate-800/30 hover:text-slate-200"
+                          ? "bg-white/[0.08] text-white"
+                          : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
                       }`}
                     >
                       <Icon
@@ -380,30 +427,32 @@ export default function SettingsPage() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
-                className="glass rounded-xl p-6"
+                className="glass rounded-xl px-6"
               >
                 {active === "profile" && (
-                  <div className="flex items-center gap-4">
-                    {user?.imageUrl && (
-                      <img
-                        src={user.imageUrl}
-                        alt=""
-                        className="h-12 w-12 rounded-full ring-2 ring-ion-500/30"
-                      />
-                    )}
-                    <div>
-                      <p className="font-medium text-white">
-                        {user?.fullName || user?.primaryEmailAddress?.emailAddress || "User"}
-                      </p>
-                      <p className="text-sm text-slate-400">
-                        {user?.primaryEmailAddress?.emailAddress}
-                      </p>
+                  <div className={ROW}>
+                    <div className="flex items-center gap-4">
+                      {user?.imageUrl && (
+                        <img
+                          src={user.imageUrl}
+                          alt=""
+                          className="h-12 w-12 rounded-full ring-2 ring-ion-500/30"
+                        />
+                      )}
+                      <div>
+                        <p className="font-medium text-white">
+                          {user?.fullName || user?.primaryEmailAddress?.emailAddress || "User"}
+                        </p>
+                        <p className="text-sm text-slate-400">
+                          {user?.primaryEmailAddress?.emailAddress}
+                        </p>
+                      </div>
                     </div>
                   </div>
                 )}
 
                 {active === "billing" && (
-                  <div className="flex items-center justify-between">
+                  <div className={ROW}>
                     <div>
                       <h2 className="text-base font-semibold text-white">Billing & Plan</h2>
                       <p className="text-xs text-slate-500">
@@ -412,7 +461,7 @@ export default function SettingsPage() {
                     </div>
                     <Link
                       href="/settings/billing"
-                      className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+                      className="shrink-0 rounded-lg border border-white/10 px-4 py-2 text-sm font-medium text-slate-300 transition hover:bg-white/[0.06] hover:text-white"
                     >
                       Manage plan
                     </Link>
@@ -421,43 +470,43 @@ export default function SettingsPage() {
 
                 {active === "aws" && (
                   <>
-                    <div className="mb-5 flex items-center justify-between">
+                    <div className={ROW}>
                       <div>
                         <h2 className="text-base font-semibold text-white">AWS Account</h2>
                         <p className="text-xs text-slate-500">Required to deploy resources</p>
                       </div>
                       {awsConfig.connected && (
-                        <span className="rounded-full border border-emerald-500/25 bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-400">
-                          Connected
+                        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-400">
+                          <Check weight="bold" className="h-3.5 w-3.5" /> Connected
                         </span>
                       )}
                     </div>
 
                     {awsConfig.connected ? (
-                      <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-4">
-                        <p className="text-sm text-emerald-300">Your AWS account is connected via IAM role.</p>
-                        <p className="mt-1 break-all font-mono text-xs text-emerald-400/80">{awsConfig.role_arn}</p>
+                      <div className={ROW}>
+                        <div className="min-w-0">
+                          <p className="text-sm text-slate-300">Your AWS account is connected via IAM role.</p>
+                          <p className="mt-1 truncate font-mono text-xs text-slate-500">{awsConfig.role_arn}</p>
+                        </div>
                         <button
                           onClick={() => setAwsConfig((prev) => ({ ...prev, connected: false }))}
-                          className="mt-2 text-xs text-slate-400 underline hover:text-white transition"
+                          className="shrink-0 text-xs text-slate-400 underline underline-offset-2 hover:text-white transition"
                         >
                           Update role
                         </button>
                       </div>
                     ) : (
-                      <div className="space-y-4">
-                        <div>
-                          <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                            Step 1 — Your External ID
-                          </label>
+                      <>
+                        <div className={`${ROW} flex-col items-stretch`}>
+                          <label className={`mb-2 block ${LABEL}`}>Step 1 — Your External ID</label>
                           <div className="flex items-center gap-2">
-                            <code className="flex-1 truncate rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-mono text-ion-300">
+                            <code className="flex-1 truncate rounded-lg border border-white/10 bg-white/[0.03] px-3.5 py-2.5 text-sm font-mono text-ion-300">
                               {awsConfig.external_id || "Loading..."}
                             </code>
                             <button
                               type="button"
                               onClick={() => awsConfig.external_id && navigator.clipboard.writeText(awsConfig.external_id)}
-                              className="shrink-0 rounded-lg border border-slate-600 px-3 py-2.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+                              className="shrink-0 rounded-lg border border-white/10 px-3 py-2.5 text-xs font-medium text-slate-300 transition hover:bg-white/[0.06] hover:text-white"
                             >
                               Copy
                             </button>
@@ -467,14 +516,12 @@ export default function SettingsPage() {
                           </p>
                         </div>
 
-                        <div>
-                          <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                            Step 2 — Deploy the access role
-                          </label>
+                        <div className={`${ROW} flex-col items-stretch`}>
+                          <label className={`mb-2 block ${LABEL}`}>Step 2 — Deploy the access role</label>
                           <a
                             href="/nimbus-cross-account-role.yaml"
                             download
-                            className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+                            className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/[0.06] hover:text-white"
                           >
                             ⬇ Download CloudFormation template
                           </a>
@@ -485,57 +532,55 @@ export default function SettingsPage() {
                           </p>
                         </div>
 
-                        <div>
-                          <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                            Step 3 — Paste the Role ARN
-                          </label>
+                        <div className={`${ROW} flex-col items-stretch`}>
+                          <label className={`mb-2 block ${LABEL}`}>Step 3 — Paste the Role ARN</label>
                           <input
                             type="text"
                             value={awsConfig.role_arn}
                             onChange={(e) => setAwsConfig((prev) => ({ ...prev, role_arn: e.target.value }))}
                             placeholder="arn:aws:iam::123456789012:role/NimbusAccessRole"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-ion-500 focus:ring-1 focus:ring-ion-500/30 font-mono"
+                            className={INPUT}
                           />
                           <p className="mt-1.5 text-xs text-slate-500">
                             Copy this from the stack&apos;s Outputs tab once it finishes creating.
                           </p>
-                        </div>
 
-                        <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
-                          <p className="text-xs text-amber-300/80">
+                          <p className="mt-4 text-xs leading-relaxed text-slate-500">
                             Nimbus never sees or stores a long-lived AWS key — it requests short-lived,
                             expiring credentials from this role only when it needs to act on your account.
                             Revoke access anytime by deleting the CloudFormation stack.
                           </p>
+
+                          {awsStatus === "error" && (
+                            <p className="mt-3 flex items-center gap-1.5 text-xs text-red-400">
+                              <WarningCircle weight="fill" className="h-3.5 w-3.5 shrink-0" />
+                              {awsError || "Failed to connect. Check the role ARN."}
+                            </p>
+                          )}
+
+                          {awsStatus === "success" && (
+                            <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
+                              <Check weight="bold" className="h-3.5 w-3.5 shrink-0" />
+                              AWS account connected successfully!
+                            </p>
+                          )}
+
+                          <button
+                            onClick={saveAWS}
+                            disabled={awsSaving || !awsConfig.role_arn}
+                            className="btn-ion mt-4 w-full rounded-xl py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+                          >
+                            {awsSaving ? "Connecting..." : "Connect AWS Account"}
+                          </button>
                         </div>
-
-                        {awsStatus === "error" && (
-                          <div className="rounded-lg bg-red-500/5 border border-red-500/20 p-3">
-                            <p className="text-xs text-red-400">{awsError || "Failed to connect. Check the role ARN."}</p>
-                          </div>
-                        )}
-
-                        {awsStatus === "success" && (
-                          <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-3">
-                            <p className="text-xs text-emerald-400">AWS account connected successfully!</p>
-                          </div>
-                        )}
-
-                        <button
-                          onClick={saveAWS}
-                          disabled={awsSaving || !awsConfig.role_arn}
-                          className="btn-ion w-full rounded-xl py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-                        >
-                          {awsSaving ? "Connecting..." : "Connect AWS Account"}
-                        </button>
-                      </div>
+                      </>
                     )}
                   </>
                 )}
 
                 {active === "github" && (
                   <>
-                    <div className="mb-5 flex items-center justify-between">
+                    <div className={ROW}>
                       <div className="flex items-center gap-2.5">
                         <GithubLogo weight="fill" className="h-4 w-4 shrink-0 text-slate-400" />
                         <div>
@@ -544,54 +589,50 @@ export default function SettingsPage() {
                         </div>
                       </div>
                       {githubConfig.connected && (
-                        <span className="rounded-full border border-emerald-500/25 bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-400">
-                          Linked
+                        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-400">
+                          <Check weight="bold" className="h-3.5 w-3.5" /> Linked
                         </span>
                       )}
                     </div>
 
                     {githubConfig.connected ? (
-                      <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-4">
-                        <p className="text-sm text-emerald-300 font-mono">{githubConfig.repo_url}</p>
+                      <div className={ROW}>
+                        <p className="truncate text-sm font-mono text-slate-300">{githubConfig.repo_url}</p>
                         <button
                           onClick={unlinkGitHub}
                           disabled={githubSaving}
-                          className="mt-2 text-xs text-slate-400 underline hover:text-white transition disabled:opacity-50"
+                          className="shrink-0 text-xs text-slate-400 underline underline-offset-2 hover:text-white transition disabled:opacity-50"
                         >
                           {githubSaving ? "Unlinking..." : "Unlink repository"}
                         </button>
                       </div>
                     ) : (
-                      <div className="space-y-4">
-                        <div>
-                          <label className="mb-1.5 block text-sm font-medium text-slate-300">
-                            Repository URL
-                          </label>
-                          <input
-                            type="text"
-                            value={githubConfig.repo_url}
-                            onChange={(e) => setGithubConfig((prev) => ({ ...prev, repo_url: e.target.value }))}
-                            placeholder="https://github.com/username/repo"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition focus:border-ion-500 focus:ring-1 focus:ring-ion-500/30 font-mono"
-                          />
-                        </div>
+                      <div className={`${ROW} flex-col items-stretch`}>
+                        <label className={`mb-2 block ${LABEL}`}>Repository URL</label>
+                        <input
+                          type="text"
+                          value={githubConfig.repo_url}
+                          onChange={(e) => setGithubConfig((prev) => ({ ...prev, repo_url: e.target.value }))}
+                          placeholder="https://github.com/username/repo"
+                          className={INPUT}
+                        />
 
                         {githubStatus === "success" && (
-                          <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-3">
-                            <p className="text-xs text-emerald-400">Repository linked!</p>
-                          </div>
+                          <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
+                            <Check weight="bold" className="h-3.5 w-3.5 shrink-0" /> Repository linked!
+                          </p>
                         )}
 
                         {githubStatus === "error" && (
-                          <div className="rounded-lg bg-red-500/5 border border-red-500/20 p-3">
-                            <p className="text-xs text-red-400">Failed to link repository.</p>
-                          </div>
+                          <p className="mt-3 flex items-center gap-1.5 text-xs text-red-400">
+                            <WarningCircle weight="fill" className="h-3.5 w-3.5 shrink-0" /> Failed to link repository.
+                          </p>
                         )}
 
                         <button
                           onClick={saveGitHub}
                           disabled={githubSaving || !githubConfig.repo_url}
-                          className="w-full rounded-xl border border-slate-600 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white disabled:opacity-40"
+                          className="mt-4 w-full rounded-xl border border-white/10 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
                         >
                           {githubSaving ? "Linking..." : "Link Repository"}
                         </button>
@@ -602,215 +643,320 @@ export default function SettingsPage() {
 
                 {active === "api-keys" && (
                   <>
-                    <div className="mb-5">
-                      <h2 className="text-base font-semibold text-white">API Keys</h2>
-                      <p className="text-xs text-slate-500">
-                        Bring your own key per provider so your chats run on your own quota instead of
-                        Nimbus&apos;s shared one. Keys are encrypted at rest and never shown again after saving.
-                      </p>
+                    <div className={ROW}>
+                      <div>
+                        <h2 className="text-base font-semibold text-white">API Keys</h2>
+                        <p className="text-xs text-slate-500">
+                          Bring your own key per provider so your chats run on your own quota instead of
+                          Nimbus&apos;s shared one. Keys are encrypted at rest and never shown again after saving.
+                        </p>
+                      </div>
+                      {addableProviders.length > 0 && !addingKey && (
+                        <button
+                          onClick={() => startAddKey()}
+                          className="btn-ion flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white"
+                        >
+                          <Plus weight="bold" className="h-3.5 w-3.5" /> Add key
+                        </button>
+                      )}
                     </div>
 
-                    <div className="space-y-3">
-                      {API_KEY_PROVIDERS.map(({ id, label, hint }) => {
-                        const status = apiKeys[id];
-                        const editing = apiKeyEditing[id] ?? false;
-                        const reveal = apiKeyReveal[id] ?? false;
-                        const saving = apiKeySaving === id;
-                        const error = apiKeyError[id];
+                    {/* Keys the user has brought themselves — edit or delete only,
+                        never a bare input sitting open. */}
+                    {API_KEY_PROVIDERS.filter((p) => apiKeys[p.id]?.source === "user").map(({ id, label, hint }) => {
+                      const status = apiKeys[id];
+                      const editing = apiKeyEditing[id] ?? false;
+                      const reveal = apiKeyReveal[id] ?? false;
+                      const saving = apiKeySaving === id;
+                      const error = apiKeyError[id];
 
-                        return (
-                          <div key={id} className="rounded-lg bg-slate-800/50 p-4">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-medium text-white">{label}</p>
-                                <p className="text-xs text-slate-500">{hint}</p>
-                              </div>
-                              {status?.source === "user" && (
-                                <span className="flex shrink-0 items-center gap-1 rounded-full border border-frost-500/25 bg-frost-500/15 px-2.5 py-1 text-xs font-medium text-frost-300">
+                      return (
+                        <div key={id} className={`${ROW} flex-col items-stretch`}>
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-white">{label}</p>
+                              <p className="text-xs text-slate-500">{hint}</p>
+                            </div>
+                            {!editing && (
+                              <div className="flex shrink-0 items-center gap-1">
+                                <span className="mr-1 flex items-center gap-1 text-xs font-medium text-frost-300">
                                   <Check weight="bold" className="h-3 w-3" /> Your key
                                 </span>
-                              )}
-                              {status?.source === "operator" && (
-                                <span className="shrink-0 rounded-full border border-slate-600 px-2.5 py-1 text-xs font-medium text-slate-400">
-                                  Shared key
-                                </span>
-                              )}
-                              {status && !status.configured && (
-                                <span className="shrink-0 rounded-full border border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-500">
-                                  Not configured
-                                </span>
-                              )}
-                            </div>
-
-                            {status?.source === "user" && !editing ? (
-                              <div className="mt-3 flex items-center gap-2">
-                                <code className="flex-1 truncate rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs font-mono text-slate-400">
-                                  {status.masked}
-                                </code>
                                 <button
                                   onClick={() => setApiKeyEditing((prev) => ({ ...prev, [id]: true }))}
-                                  className="shrink-0 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-slate-300 transition hover:bg-slate-800 hover:text-white"
+                                  className={ICON_BTN}
+                                  title="Edit key"
                                 >
-                                  Replace
+                                  <PencilSimple className="h-4 w-4" />
                                 </button>
                                 <button
                                   onClick={() => deleteApiKey(id)}
                                   disabled={saving}
-                                  className="shrink-0 rounded-lg border border-red-900/50 px-3 py-2 text-xs font-medium text-red-400 transition hover:bg-red-500/10 disabled:opacity-40"
+                                  className={`${ICON_BTN} hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40`}
+                                  title="Delete key"
                                 >
-                                  <X weight="bold" className="h-3.5 w-3.5" />
+                                  <Trash className="h-4 w-4" />
                                 </button>
-                              </div>
-                            ) : (
-                              <div className="mt-3 flex items-center gap-2">
-                                <div className="relative flex-1">
-                                  <input
-                                    type={reveal ? "text" : "password"}
-                                    value={apiKeyDrafts[id] || ""}
-                                    onChange={(e) =>
-                                      setApiKeyDrafts((prev) => ({ ...prev, [id]: e.target.value }))
-                                    }
-                                    placeholder={`Paste your ${label} key`}
-                                    className="w-full rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 pr-9 text-xs text-white placeholder-slate-500 outline-none transition focus:border-ion-500 focus:ring-1 focus:ring-ion-500/30 font-mono"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => setApiKeyReveal((prev) => ({ ...prev, [id]: !reveal }))}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-                                    tabIndex={-1}
-                                  >
-                                    {reveal ? <EyeSlash className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                  </button>
-                                </div>
-                                <button
-                                  onClick={() => saveApiKey(id)}
-                                  disabled={saving || !(apiKeyDrafts[id] || "").trim()}
-                                  className="btn-ion shrink-0 rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
-                                >
-                                  {saving ? "Saving..." : "Save"}
-                                </button>
-                                {editing && (
-                                  <button
-                                    onClick={() => setApiKeyEditing((prev) => ({ ...prev, [id]: false }))}
-                                    className="shrink-0 text-xs text-slate-500 hover:text-slate-300"
-                                  >
-                                    Cancel
-                                  </button>
-                                )}
                               </div>
                             )}
-                            {error && <p className="mt-1.5 text-xs text-red-400">{error}</p>}
                           </div>
-                        );
-                      })}
-                    </div>
+
+                          {!editing ? (
+                            <code className="mt-2 w-fit rounded-md bg-white/[0.03] px-2.5 py-1 text-xs font-mono text-slate-500">
+                              {status?.masked}
+                            </code>
+                          ) : (
+                            <div className="mt-3 flex items-center gap-2">
+                              <div className="relative flex-1">
+                                <input
+                                  type={reveal ? "text" : "password"}
+                                  value={apiKeyDrafts[id] || ""}
+                                  onChange={(e) => setApiKeyDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                                  placeholder={`Paste your new ${label} key`}
+                                  autoFocus
+                                  className={`${INPUT} pr-9 py-2 text-xs`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setApiKeyReveal((prev) => ({ ...prev, [id]: !reveal }))}
+                                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                                  tabIndex={-1}
+                                >
+                                  {reveal ? <EyeSlash className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </button>
+                              </div>
+                              <button
+                                onClick={() => saveApiKey(id)}
+                                disabled={saving || !(apiKeyDrafts[id] || "").trim()}
+                                className="btn-ion shrink-0 rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
+                              >
+                                {saving ? "Saving..." : "Save"}
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setApiKeyEditing((prev) => ({ ...prev, [id]: false }));
+                                  setApiKeyDrafts((prev) => ({ ...prev, [id]: "" }));
+                                }}
+                                className="shrink-0 text-xs text-slate-500 hover:text-slate-300"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          )}
+                          {error && (
+                            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-red-400">
+                              <WarningCircle weight="fill" className="h-3.5 w-3.5 shrink-0" /> {error}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* New key flow — explicit provider picker, only offered for
+                        providers that don't already have a user key. */}
+                    {addingKey && addProvider && (
+                      <div className={`${ROW} flex-col items-stretch`}>
+                        <div className="flex items-center gap-2">
+                          <div className="relative">
+                            <select
+                              value={addProvider}
+                              onChange={(e) => setAddProvider(e.target.value)}
+                              className="appearance-none rounded-lg border border-white/10 bg-white/[0.03] py-2 pl-3 pr-8 text-xs font-medium text-white outline-none transition focus:border-ion-500/60 focus:ring-1 focus:ring-ion-500/25"
+                            >
+                              {addableProviders.map((p) => (
+                                <option key={p.id} value={p.id} className="bg-slate-900">
+                                  {p.label}
+                                </option>
+                              ))}
+                            </select>
+                            <CaretDown className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500" />
+                          </div>
+                          <p className="text-xs text-slate-500">
+                            {API_KEY_PROVIDERS.find((p) => p.id === addProvider)?.hint}
+                          </p>
+                        </div>
+
+                        <div className="mt-3 flex items-center gap-2">
+                          <div className="relative flex-1">
+                            <input
+                              type={apiKeyReveal[addProvider] ? "text" : "password"}
+                              value={apiKeyDrafts[addProvider] || ""}
+                              onChange={(e) => setApiKeyDrafts((prev) => ({ ...prev, [addProvider]: e.target.value }))}
+                              placeholder={`Paste your ${API_KEY_PROVIDERS.find((p) => p.id === addProvider)?.label} key`}
+                              autoFocus
+                              className={`${INPUT} pr-9 py-2 text-xs`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setApiKeyReveal((prev) => ({ ...prev, [addProvider]: !prev[addProvider] }))
+                              }
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                              tabIndex={-1}
+                            >
+                              {apiKeyReveal[addProvider] ? <EyeSlash className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                          </div>
+                          <button
+                            onClick={() => saveApiKey(addProvider)}
+                            disabled={apiKeySaving === addProvider || !(apiKeyDrafts[addProvider] || "").trim()}
+                            className="btn-ion shrink-0 rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
+                          >
+                            {apiKeySaving === addProvider ? "Saving..." : "Save"}
+                          </button>
+                          <button onClick={cancelAddKey} className="shrink-0 text-xs text-slate-500 hover:text-slate-300">
+                            Cancel
+                          </button>
+                        </div>
+                        {apiKeyError[addProvider] && (
+                          <p className="mt-1.5 flex items-center gap-1.5 text-xs text-red-400">
+                            <WarningCircle weight="fill" className="h-3.5 w-3.5 shrink-0" /> {apiKeyError[addProvider]}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Providers not backed by a user key yet — status only. Whichever
+                        provider is mid-add already has a row in the form above it. */}
+                    {API_KEY_PROVIDERS.filter(
+                      (p) => apiKeys[p.id]?.source !== "user" && !(addingKey && addProvider === p.id)
+                    ).map(({ id, label, hint }) => {
+                      const status = apiKeys[id];
+                      return (
+                        <div key={id} className={ROW}>
+                          <div>
+                            <p className="text-sm font-medium text-slate-300">{label}</p>
+                            <p className="text-xs text-slate-500">{hint}</p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-3">
+                            <span className="text-xs font-medium text-slate-500">
+                              {status?.source === "operator" ? "Shared key" : "Not configured"}
+                            </span>
+                            {!(addingKey && addProvider === id) && (
+                              <button
+                                onClick={() => startAddKey(id)}
+                                className="text-xs font-medium text-ion-400 hover:text-ion-300"
+                              >
+                                Use your own
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </>
                 )}
 
                 {active === "models" && (
                   <>
-                    <div className="mb-5">
-                      <h2 className="text-base font-semibold text-white">Model Configurations</h2>
-                      <p className="text-xs text-slate-500">
-                        Override which model each provider runs on. Every Nimbus agent depends on
-                        tool/function calling — pick a model that supports it, or agents will silently fail.
-                      </p>
+                    <div className={ROW}>
+                      <div>
+                        <h2 className="text-base font-semibold text-white">Model Configurations</h2>
+                        <p className="text-xs text-slate-500">
+                          Override which model each provider runs on. Every Nimbus agent depends on
+                          tool/function calling — pick a model that supports it, or agents will silently fail.
+                        </p>
+                      </div>
                     </div>
 
-                    <div className="space-y-3">
-                      {API_KEY_PROVIDERS.map(({ id, label }) => {
-                        const status = models[id];
-                        const saving = modelSaving === id;
-                        const error = modelError[id];
-                        // The field is prefilled with the current effective model (default or
-                        // custom) even before the user edits it — Save/disabled logic must key
-                        // off that displayed value, not only what's actively been typed.
-                        const displayValue = modelDrafts[id] ?? status?.model ?? "";
+                    {API_KEY_PROVIDERS.map(({ id, label }) => {
+                      const status = models[id];
+                      const saving = modelSaving === id;
+                      const error = modelError[id];
+                      // The field is prefilled with the current effective model (default or
+                      // custom) even before the user edits it — Save/disabled logic must key
+                      // off that displayed value, not only what's actively been typed.
+                      const displayValue = modelDrafts[id] ?? status?.model ?? "";
 
-                        return (
-                          <div key={id} className="rounded-lg bg-slate-800/50 p-4">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-medium text-white">{label}</p>
-                                <p className="text-xs text-slate-500">
-                                  Default: <span className="font-mono">{status?.default ?? "…"}</span>
-                                </p>
-                              </div>
-                              {status?.is_custom && (
-                                <span className="flex shrink-0 items-center gap-1 rounded-full border border-frost-500/25 bg-frost-500/15 px-2.5 py-1 text-xs font-medium text-frost-300">
-                                  <Check weight="bold" className="h-3 w-3" /> Custom
-                                </span>
-                              )}
+                      return (
+                        <div key={id} className={`${ROW} flex-col items-stretch`}>
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-white">{label}</p>
+                              <p className="text-xs text-slate-500">
+                                Default: <span className="font-mono">{status?.default ?? "…"}</span>
+                              </p>
                             </div>
-
-                            <div className="mt-3 flex items-center gap-2">
-                              <input
-                                type="text"
-                                value={displayValue}
-                                onChange={(e) => setModelDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
-                                placeholder={status?.default}
-                                className="w-full rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition focus:border-ion-500 focus:ring-1 focus:ring-ion-500/30 font-mono"
-                              />
-                              <button
-                                onClick={() => saveModel(id)}
-                                disabled={saving || !displayValue.trim()}
-                                className="btn-ion shrink-0 rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
-                              >
-                                {saving ? "Saving..." : "Save"}
-                              </button>
-                              {status?.is_custom && (
-                                <button
-                                  onClick={() => resetModel(id)}
-                                  disabled={saving}
-                                  title="Reset to default"
-                                  className="shrink-0 rounded-lg border border-slate-600 p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white disabled:opacity-40"
-                                >
-                                  <ArrowCounterClockwise className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </div>
-                            {error && <p className="mt-1.5 text-xs text-red-400">{error}</p>}
+                            {status?.is_custom && (
+                              <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-frost-300">
+                                <Check weight="bold" className="h-3 w-3" /> Custom
+                              </span>
+                            )}
                           </div>
-                        );
-                      })}
-                    </div>
+
+                          <div className="mt-3 flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={displayValue}
+                              onChange={(e) => setModelDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                              placeholder={status?.default}
+                              className={`${INPUT} py-2 text-xs`}
+                            />
+                            <button
+                              onClick={() => saveModel(id)}
+                              disabled={saving || !displayValue.trim()}
+                              className="btn-ion shrink-0 rounded-lg px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
+                            >
+                              {saving ? "Saving..." : "Save"}
+                            </button>
+                            {status?.is_custom && (
+                              <button
+                                onClick={() => resetModel(id)}
+                                disabled={saving}
+                                title="Reset to default"
+                                className={ICON_BTN}
+                              >
+                                <ArrowCounterClockwise className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                          {error && (
+                            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-red-400">
+                              <WarningCircle weight="fill" className="h-3.5 w-3.5 shrink-0" /> {error}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
                   </>
                 )}
 
                 {active === "preferences" && (
                   <>
-                    <div className="mb-5">
-                      <h2 className="text-base font-semibold text-white">Preferences</h2>
-                      <p className="text-xs text-slate-500">Configure how Nimbus behaves</p>
+                    <div className={ROW}>
+                      <div>
+                        <h2 className="text-base font-semibold text-white">Preferences</h2>
+                        <p className="text-xs text-slate-500">Configure how Nimbus behaves</p>
+                      </div>
                     </div>
 
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between rounded-lg bg-slate-800/50 p-4">
-                        <div>
-                          <p className="text-sm font-medium text-white">Free Tier Mode</p>
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            Restrict Architect to only recommend free-tier eligible services
-                          </p>
-                        </div>
-                        <label className="relative inline-flex cursor-pointer items-center">
-                          <input
-                            type="checkbox"
-                            checked={freeTier}
-                            onChange={(e) => {
-                              setFreeTier(e.target.checked);
-                              localStorage.setItem("nimbus_free_tier", JSON.stringify(e.target.checked));
-                            }}
-                            className="peer sr-only"
-                          />
-                          <div className="peer h-6 w-11 rounded-full bg-slate-700 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-ion-500 peer-checked:after:translate-x-full peer-checked:after:bg-white" />
-                        </label>
+                    <div className={ROW}>
+                      <div>
+                        <p className="text-sm font-medium text-white">Free Tier Mode</p>
+                        <p className="mt-0.5 text-xs text-slate-500">
+                          Restrict Architect to only recommend free-tier eligible services
+                        </p>
                       </div>
+                      <label className="relative inline-flex shrink-0 cursor-pointer items-center">
+                        <input
+                          type="checkbox"
+                          checked={freeTier}
+                          onChange={(e) => {
+                            setFreeTier(e.target.checked);
+                            localStorage.setItem("nimbus_free_tier", JSON.stringify(e.target.checked));
+                          }}
+                          className="peer sr-only"
+                        />
+                        <div className="peer h-6 w-11 rounded-full bg-slate-700 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-ion-500 peer-checked:after:translate-x-full peer-checked:after:bg-white" />
+                      </label>
+                    </div>
 
-                      <div className="rounded-lg bg-slate-800/50 p-4">
+                    <div className={ROW}>
+                      <div>
                         <p className="text-sm font-medium text-white">Bodyguard Auto-stop</p>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Always on — Bodyguard automatically stops Nimbus-managed instances with &lt;5% CPU for 30+ minutes
-                          and alerts you before it does. There&apos;s no off switch yet.
+                        <p className="mt-0.5 text-xs text-slate-500">
+                          Always on — Bodyguard automatically stops Nimbus-managed instances with &lt;5% CPU for 30+
+                          minutes and alerts you before it does. There&apos;s no off switch yet.
                         </p>
                       </div>
                     </div>
