@@ -144,3 +144,32 @@ def test_factory_huggingface_builds_openai_compat_at_hf_router(monkeypatch):
 def test_factory_unknown_provider_rejected():
     with pytest.raises(ValueError, match="Unknown LLM provider"):
         llm.get_provider("gpt5")
+
+
+def test_factory_local_defaults_to_ollama_on_the_docker_host(monkeypatch):
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_MODEL", raising=False)
+    with patch("utils.llm.openai_compat.OpenAICompatProvider") as Provider:
+        llm.get_provider("local")
+    kwargs = Provider.call_args.kwargs
+    assert kwargs["base_url"] == "http://host.docker.internal:11434/v1"
+    assert kwargs["model"] == "qwen2.5:14b"
+    assert kwargs["api_key"]  # some non-empty placeholder — local servers don't check it
+
+
+def test_factory_local_honors_env_overrides(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://host.docker.internal:8080/v1")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "llama3.1:8b")
+    with patch("utils.llm.openai_compat.OpenAICompatProvider") as Provider:
+        llm.get_provider("local")
+    kwargs = Provider.call_args.kwargs
+    assert kwargs["base_url"] == "http://host.docker.internal:8080/v1"
+    assert kwargs["model"] == "llama3.1:8b"
+
+
+def test_local_is_not_a_known_provider():
+    """Dev-only escape hatch — must never surface in Settings > API Keys or the
+    chat model switcher, only reachable via LLM_PROVIDER=local."""
+    from config import KNOWN_PROVIDERS
+
+    assert "local" not in KNOWN_PROVIDERS

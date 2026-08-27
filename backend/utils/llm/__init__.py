@@ -59,6 +59,26 @@ def get_provider(name: str = None, api_key: str = None, model: str = None):
             model=model or os.getenv("OPENROUTER_MODEL", MODEL_DEFAULTS["openrouter"]),
         )
 
+    if name == "local":
+        from utils.llm.openai_compat import OpenAICompatProvider
+
+        # Dev-only escape hatch: point at any OpenAI-compatible server running on
+        # the host machine (Ollama, LM Studio, vLLM, llama.cpp server) — same
+        # OpenAICompatProvider, just a different base_url, so swapping back to a
+        # real provider later is a one-line env change, not a code change.
+        # host.docker.internal resolves to the host from inside the backend
+        # container on Docker Desktop (Windows/Mac); on native Linux Docker you'd
+        # need --add-host=host.docker.internal:host-gateway or a LAN IP instead.
+        # Deliberately NOT in config.KNOWN_PROVIDERS — never user-selectable via
+        # Settings > API Keys or the chat model switcher, only LLM_PROVIDER=local.
+        return OpenAICompatProvider(
+            base_url=os.getenv("LOCAL_LLM_BASE_URL", "http://host.docker.internal:11434/v1"),
+            # Most local servers (Ollama included) don't check the key at all —
+            # the OpenAI SDK just requires the field to be a non-empty string.
+            api_key=api_key or os.getenv("LOCAL_LLM_API_KEY", "local-no-key-needed"),
+            model=model or os.getenv("LOCAL_LLM_MODEL", "qwen2.5:14b"),
+        )
+
     if name in ("huggingface", "hf"):
         from utils.llm.openai_compat import OpenAICompatProvider
 
@@ -76,7 +96,7 @@ def get_provider(name: str = None, api_key: str = None, model: str = None):
         )
 
     raise ValueError(
-        f"Unknown LLM provider '{name}'. Options: bedrock, groq, openrouter, huggingface."
+        f"Unknown LLM provider '{name}'. Options: bedrock, groq, openrouter, huggingface, local."
     )
 
 
