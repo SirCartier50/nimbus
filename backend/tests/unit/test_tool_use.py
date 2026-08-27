@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from utils import tool_use
-from utils.llm.base import _run_one_tool
+from utils.llm.base import _collapse_repetition, _run_one_tool
 
 
 # ---- P1-1 spotlighting + P2-1 detection on tool results -----------------
@@ -122,6 +122,55 @@ def test_all_models_fail_returns_error_text_instead_of_raising():
         result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {}, provider="bedrock")
 
     assert "All models failed" in result["text"]
+
+
+# ---- degenerate-repetition guard (_collapse_repetition) -----------------
+
+_LAUNCHED_BLOCK = (
+    "### Action:\n"
+    "1. **Instance Launched** (t3.micro)\n"
+    "   - Region: us-east-1\n\n"
+    "2. **Next Steps**:\n"
+    "   - Provide public IP once running.\n\n"
+    "(Stand by for instance launch confirmation...)"
+)
+
+
+def test_collapses_a_block_repeated_many_times():
+    # Mirrors the real failure: the same multi-paragraph block repeated verbatim
+    # until max_tokens cut it off.
+    looped = "\n\n".join([_LAUNCHED_BLOCK] * 25)
+    result = _collapse_repetition(looped)
+    assert result.count("Instance Launched") == 1
+    assert "cut short" in result
+
+
+def test_leaves_normal_non_repeating_text_unchanged():
+    text = (
+        "Here's your plan.\n\n"
+        "### Step 1\nLaunch the instance.\n\n"
+        "### Step 2\nInstall k3s.\n\n"
+        "### Step 3\nApply your config."
+    )
+    assert _collapse_repetition(text) == text
+
+
+def test_does_not_flag_short_incidental_repeats():
+    # "OK" / "Got it" style short paragraphs repeating isn't a degenerate loop —
+    # min_block_chars guards against false positives on short repeated lines.
+    text = "\n\n".join(["OK"] * 10)
+    assert _collapse_repetition(text) == text
+
+
+def test_run_tool_loop_end_turn_text_is_collapsed():
+    client = MagicMock()
+    looped = "\n\n".join([_LAUNCHED_BLOCK] * 10)
+    client.converse.return_value = _converse_response("end_turn", [{"text": looped}])
+
+    with patch("utils.llm.bedrock.get_bedrock_client", return_value=client):
+        result = tool_use.run_tool_loop("sys", [{"role": "user", "content": [{"text": "hi"}]}], {"tools": []}, {}, provider="bedrock")
+
+    assert result["text"].count("Instance Launched") == 1
 
 
 def test_max_iterations_reached_returns_gracefully():

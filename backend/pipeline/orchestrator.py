@@ -319,7 +319,7 @@ STAGE_MESSAGES = {
 }
 
 
-def stream_turn(state: PipelineState):
+def stream_turn(state: PipelineState, should_cancel=lambda: False):
     """Run one turn, yielding a progress event as each graph node finishes, then a
     final event carrying the rebuilt PipelineState.
 
@@ -328,6 +328,13 @@ def stream_turn(state: PipelineState):
     gets live, per-agent progress instead of a single blocking wait. The terminal
     state is reconstructed by layering every node's update over the starting state
     (later updates win), the same fields `run_turn` would have returned.
+
+    `should_cancel` is polled after each node finishes (a real stop, "just like
+    Claude" — verified that breaking this loop genuinely halts further node
+    execution rather than merely stopping consumption of an already-running graph).
+    Never honored once `executor` (real AWS actions) has run — checked defensively
+    even though the graph shape makes `executor` unreachable mid-stream today (it's
+    only ever the first node of a turn, entered straight from route_entry).
     """
     accumulated = dict(_STATE_INIT(state))
     for chunk in _GRAPH.stream(state, stream_mode="updates"):
@@ -335,6 +342,9 @@ def stream_turn(state: PipelineState):
             if isinstance(update, dict):
                 accumulated.update(update)
             yield {"type": "progress", "stage": node, "message": STAGE_MESSAGES.get(node, f"Running {node}…")}
+            if node != "executor" and should_cancel():
+                yield {"type": "cancelled"}
+                return
     yield {"type": "final", "state": _rebuild(accumulated)}
 
 

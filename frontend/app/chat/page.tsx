@@ -741,6 +741,9 @@ export default function ChatPage() {
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // The in-flight turn's abort handle — created fresh per sendMessage call, so
+  // Stop always targets the turn actually on screen, not a stale one.
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -863,6 +866,9 @@ export default function ChatPage() {
     setLoading(true);
     setLiveActivity([]);
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     // Trace for just this turn — filled by REAL progress events streamed from the
     // backend as each agent finishes, then attached to the assistant message as a
     // collapsible trail. Also mirrored into `liveActivity` so the user watches the
@@ -892,6 +898,7 @@ export default function ChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -947,6 +954,19 @@ export default function ChatPage() {
         },
       ]);
     } catch (e: unknown) {
+      // The user clicked Stop — not a failure, so no error styling/messaging.
+      // The backend finishes whatever agent step was already in flight and
+      // stops there on its own (POST /chat/cancel, fired below); nothing from
+      // this turn gets persisted as a real reply, so there's nothing to recover.
+      if (e instanceof DOMException && e.name === "AbortError") {
+        addActivity("system", "Stopped.", "info");
+        setMessages((m) => [
+          ...m,
+          { role: "assistant", content: "Stopped.", activityLog: turnActivity, timestamp: Date.now() },
+        ]);
+        return; // `finally` below still runs (setLoading(false) etc.)
+      }
+
       // A thrown TypeError here (not one we raised above) means the request never
       // reached a server at all — an actual network failure, not an app error.
       const isNetworkFailure = e instanceof TypeError;
@@ -970,6 +990,22 @@ export default function ChatPage() {
       setLoading(false);
       setLiveActivity([]);
       setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  };
+
+  // Stop button: abort the browser-side connection immediately (instant UI
+  // feedback, just like Claude) AND tell the backend to stop advancing the
+  // turn (best-effort — see POST /chat/cancel). The backend never honors this
+  // once a real deploy (the executor step) has started; it can only stop a
+  // turn that's still just LLM/read-only-tool work.
+  const stopGeneration = () => {
+    abortControllerRef.current?.abort();
+    if (sessionId) {
+      authFetch(`${API}/chat/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      }).catch(() => {});
     }
   };
 
@@ -1100,15 +1136,28 @@ export default function ChatPage() {
               />
               <div className="flex items-center justify-between px-1 pt-1">
                 <ModelSelector value={provider} onChange={changeProvider} available={providerAvailability} />
-                <button
-                  type="submit"
-                  disabled={loading || !input.trim()}
-                  className="btn-ion flex h-8 w-8 items-center justify-center rounded-lg text-white disabled:opacity-30"
-                >
-                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 19.5l15-7.5-15-7.5v6l10 1.5-10 1.5v6z" />
-                  </svg>
-                </button>
+                {loading ? (
+                  <button
+                    type="button"
+                    onClick={stopGeneration}
+                    title="Stop"
+                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-600 text-slate-200 transition hover:bg-slate-700 active:scale-[0.97]"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+                      <rect x="5" y="5" width="14" height="14" rx="2" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!input.trim()}
+                    className="btn-ion flex h-8 w-8 items-center justify-center rounded-lg text-white disabled:opacity-30"
+                  >
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 19.5l15-7.5-15-7.5v6l10 1.5-10 1.5v6z" />
+                    </svg>
+                  </button>
+                )}
               </div>
             </form>
           </div>

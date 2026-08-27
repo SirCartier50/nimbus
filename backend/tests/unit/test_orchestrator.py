@@ -184,6 +184,53 @@ def test_stream_turn_surfaces_the_refinement_cycle_live():
     assert final.plan["plan"][0]["resource_type"] == "s3_bucket"
 
 
+def test_stream_turn_honors_cancellation_between_nodes():
+    """should_cancel is polled after each node — a multi-node turn (the
+    validate<->architect refinement cycle) stops advancing once it fires,
+    instead of running to completion."""
+    spec = {"intent": "a cache"}
+    bad = {"plan": [{"action": "create", "resource_type": "rds_instance", "config": {}}]}  # not free-tier
+    good = {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {}}]}
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(spec=spec)), \
+         patch("pipeline.orchestrator.run_architect", side_effect=[_arch(plan=bad), _arch(plan=good)]) as m_arch, \
+         patch("pipeline.orchestrator.run_critic", return_value=_NO_CRITIQUE):
+        # Cancel as soon as the first "architect" progress event is seen.
+        cancelled = {"now": False}
+
+        def should_cancel():
+            return cancelled["now"]
+
+        events = []
+        for event in stream_turn(_state(free_tier_mode=True), should_cancel=should_cancel):
+            events.append(event)
+            if event["type"] == "progress" and event["stage"] == "architect":
+                cancelled["now"] = True
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "cancelled"
+    assert "final" not in types
+    # Only the first architect call happened — the refinement cycle's second
+    # pass never ran because the graph stopped advancing.
+    assert m_arch.call_count == 1
+
+
+def test_stream_turn_never_honors_cancellation_once_executor_ran():
+    plan = {"plan": [{"action": "create", "resource_type": "s3_bucket", "config": {"Bucket": "x"}}]}
+    exec_result = {"text": "done", "results": [{"success": True, "resource_id": "x"}]}
+    with patch("pipeline.orchestrator.run_executor", return_value=exec_result), \
+         patch("pipeline.orchestrator.generate_files", return_value={}), \
+         patch("pipeline.orchestrator.run_validator", return_value=[]), \
+         patch("pipeline.orchestrator.run_summary", return_value="All set!"):
+        # Cancellation is already "on" for the entire turn — even so, a turn
+        # that enters straight into executor (a confirmed deploy) must complete.
+        events = list(stream_turn(_state(confirm=True, pending_plan=plan), should_cancel=lambda: True))
+
+    types = [e["type"] for e in events]
+    assert "cancelled" not in types
+    final = next(e for e in events if e["type"] == "final")
+    assert final["state"].outcome == "executed"
+
+
 def test_stream_turn_conversation_stops_after_requirements():
     with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="Which region?")), \
          patch("pipeline.orchestrator.run_architect") as m_arch:

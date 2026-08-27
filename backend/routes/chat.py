@@ -67,6 +67,38 @@ class ChatRequest(BaseModel):
     provider: Optional[str] = None
 
 
+class CancelRequest(BaseModel):
+    session_id: str
+
+
+# Exact-match only — never substring ("why did launch fail" must NOT match "launch").
+# Neither Requirements nor Architect has a tool to actually create/delete/start/stop
+# anything; only clicking Yes/No on a proposed plan (ChatRequest.confirm) does. A user
+# who types a plain-English confirmation instead of clicking the button used to get a
+# free-text chat reply that could only hallucinate having acted — observed live: the
+# model repeatedly claimed "Instance Launched" with nothing actually created. When a
+# plan is genuinely pending, map these to the same confirm the button would send.
+_AFFIRMATIVE_REPLIES = {
+    "yes", "y", "yeah", "yep", "yup", "confirm", "confirmed", "confirm it",
+    "go ahead", "go for it", "do it", "launch", "launch it", "deploy", "deploy it",
+    "proceed", "sure", "ok", "okay", "sounds good", "let's go", "lets go",
+    "approve", "approved",
+}
+_NEGATIVE_REPLIES = {
+    "no", "n", "nope", "nah", "cancel", "cancel it", "cancelled", "canceled",
+    "stop", "don't", "dont", "never mind", "nevermind", "not now", "abort", "reject",
+}
+
+
+def _infer_confirm_from_text(message: str) -> Optional[bool]:
+    normalized = message.strip().lower().rstrip(".!?")
+    if normalized in _AFFIRMATIVE_REPLIES:
+        return True
+    if normalized in _NEGATIVE_REPLIES:
+        return False
+    return None
+
+
 class ChatResponse(BaseModel):
     session_id: str
     role: str
@@ -313,6 +345,8 @@ async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(ge
     await _spend_turn_budget(user)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
+    if req.confirm is None and session.pending_plan:
+        req.confirm = _infer_confirm_from_text(req.message)
     state = await _build_state(db, user, session, req, aws_session)
 
     # The agents block on Bedrock/boto3 — run the whole turn in the dedicated
@@ -353,6 +387,29 @@ def _sse(obj: dict) -> str:
 # without this a client disconnect could let the GC collect a task mid-deploy.
 _turn_tasks: set = set()
 
+# Session ids with a pending stop request (see POST /chat/cancel). In-memory and
+# best-effort: fine for a single backend process; a horizontally-scaled deployment
+# would need this in Redis instead, since the request may land on a different
+# replica than the one running the turn. Honored ONLY between LangGraph nodes and
+# NEVER once the executor node (real AWS actions) has started — see
+# pipeline.orchestrator.stream_turn.
+_cancel_requested: set = set()
+
+
+@router.post("/chat/cancel")
+async def cancel_turn(body: CancelRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Best-effort stop for an in-flight /chat/stream turn — 'just like Claude's
+    stop button' but scoped to what's actually safe here: it halts the LLM/graph
+    from advancing to another agent, but can never interrupt the executor node
+    once real AWS actions have started (that node isn't reachable mid-stream —
+    see stream_turn — so this can't arrive too late to matter for safety, only
+    too late to matter for speed)."""
+    user = await get_or_create_user(db, request.state.user_id)
+    session = await _get_owned_session(db, user.id, body.session_id)
+    if session is not None:
+        _cancel_requested.add(body.session_id)
+    return {"ok": True}
+
 
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
@@ -371,6 +428,8 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
     await _spend_turn_budget(user)
     aws_session = await get_user_boto3_session(db, user.id)
     session = await _load_session(db, user, req)
+    if req.confirm is None and session.pending_plan:
+        req.confirm = _infer_confirm_from_text(req.message)
     state = await _build_state(db, user, session, req, aws_session)
 
     if _turn_slots.locked():
@@ -378,6 +437,9 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
 
     clerk_user_id = request.state.user_id
     session_id = str(session.id)
+    # This turn starts clean regardless of any stale /chat/cancel from a turn that
+    # already finished (the flag is per-session-id, not per-turn).
+    _cancel_requested.discard(session_id)
     queue: asyncio.Queue = asyncio.Queue()
 
     async def run_and_finalize():
@@ -388,9 +450,11 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
             # stream_turn drives the graph synchronously (blocking Bedrock/boto3
             # calls); progress events hop back to the event loop via the queue.
             try:
-                for event in stream_turn(state):
+                for event in stream_turn(state, should_cancel=lambda: session_id in _cancel_requested):
                     if event["type"] == "final":
                         holder["state"] = event["state"]
+                    elif event["type"] == "cancelled":
+                        holder["cancelled"] = True
                     else:
                         loop.call_soon_threadsafe(queue.put_nowait, event)
             except ValueError as e:
@@ -415,6 +479,15 @@ async def chat_stream(req: ChatRequest, request: Request, db: AsyncSession = Dep
                 queue.put_nowait(
                     {"type": "error", "message": f"Sorry, something went wrong: {holder['error']}"}
                 )
+                return
+
+            if holder.get("cancelled"):
+                # Deliberately skip _finalize_turn: whatever the graph got through
+                # (e.g. a plan proposal with no Tier-1/critic validation yet) is
+                # discarded rather than persisted as if it were real — nothing this
+                # turn produced is trustworthy enough to surface as a confirmable
+                # plan. Session state is exactly as it was before this turn.
+                queue.put_nowait({"type": "cancelled"})
                 return
 
             # Fresh DB session: the request-scoped one is torn down with the HTTP

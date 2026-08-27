@@ -60,6 +60,10 @@ IMPORTANT RULES:
 - For destructive actions (delete, terminate), clearly warn the user what will be lost
 - The <nimbus-plan> block MUST be strictly valid JSON — no "#" or "//" comments, no trailing commas.
   If a field needs explaining, put that in the natural-language explanation, not inside the JSON.
+- You PROPOSE plans; you never execute them. Nothing is created/changed until the user
+  confirms this plan in the UI and a separate execution step runs it. Never say you are
+  "launching"/"triggering"/"deploying" anything, and never say "stand by" — you're
+  producing a plan for approval, not performing an action.
 """
 
 # Curated-vs-generic preference (Bitter-Lesson knob, PROD/DECISIONS.md). The curated

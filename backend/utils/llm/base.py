@@ -14,6 +14,7 @@ dispatch tool calls, feed results back, and stop on end_turn / a terminal stop r
 """
 import json
 import logging
+from difflib import SequenceMatcher
 from typing import Protocol
 
 from utils import guard
@@ -67,7 +68,7 @@ def run_loop(provider, system_prompt, messages, tool_config, tool_handlers, max_
         messages.append(output_message)
 
         if stop_reason == "end_turn":
-            return {"text": _text_of(output_message), "messages": messages}
+            return {"text": _collapse_repetition(_text_of(output_message)), "messages": messages}
 
         # Any non-tool_use terminal stop (max_tokens, content_filtered, ...) ends the
         # turn without a tool_use block. Looping again would re-infer on a message list
@@ -75,7 +76,8 @@ def run_loop(provider, system_prompt, messages, tool_config, tool_handlers, max_
         if stop_reason != "tool_use":
             note = _STOP_NOTES.get(stop_reason, f"(stopped early: {stop_reason})")
             logger.warning(f"Unhandled stop reason '{stop_reason}' — ending turn early")
-            return {"text": (_text_of(output_message) + f"\n\n{note}").strip(), "messages": messages}
+            text = _collapse_repetition(_text_of(output_message))
+            return {"text": (text + f"\n\n{note}").strip(), "messages": messages}
 
         tool_results = [
             _run_one_tool(block["toolUse"], tool_handlers)
@@ -89,6 +91,53 @@ def run_loop(provider, system_prompt, messages, tool_config, tool_handlers, max_
 
 def _text_of(message: dict) -> str:
     return "\n".join(b["text"] for b in message.get("content", []) if "text" in b)
+
+
+def _collapse_repetition(text: str, min_repeats: int = 3, min_block_chars: int = 40) -> str:
+    """Defensive guard against degenerate decoding loops — weaker/free models
+    (this product is deliberately free-tier-only, see PIPELINE_PLAN.md §5) have
+    been observed getting stuck regenerating the same multi-paragraph block
+    verbatim (with tiny token-level drift) until max_tokens cuts them off —
+    live case: the same ~400-char "Instance Launched... Stand by..." block
+    repeated 25+ times in one reply. Detects a paragraph block that repeats
+    near-identically min_repeats+ times in a row and truncates to the first
+    occurrence, so the user sees one clean paragraph instead of a wall of
+    duplicated text.
+    """
+    paras = text.split("\n\n")
+    if len(paras) < min_repeats * 2:
+        return text
+
+    def norm(p: str) -> str:
+        return " ".join(p.split())
+
+    # Smallest repeating unit wins: a single duplicated paragraph is caught as
+    # readily as a repeating multi-paragraph cycle. Capped at 6 paragraphs/block
+    # — real degenerate loops repeat a short unit, and this keeps the check cheap.
+    max_block = min(6, len(paras) // min_repeats)
+    for block_size in range(1, max_block + 1):
+        blocks = ["\n\n".join(paras[i:i + block_size]) for i in range(0, len(paras) - block_size + 1, block_size)]
+        if len(blocks) < min_repeats:
+            continue
+        run = 1
+        for i in range(1, len(blocks)):
+            a, b = norm(blocks[i - 1]), norm(blocks[i])
+            if len(a) < min_block_chars:
+                run = 1
+                continue
+            similar = a == b or SequenceMatcher(None, a, b).quick_ratio() > 0.9
+            if not similar:
+                run = 1
+                continue
+            run += 1
+            if run >= min_repeats:
+                first_repeat_block = i - run + 1
+                kept = paras[: (first_repeat_block + 1) * block_size]
+                return (
+                    "\n\n".join(kept).strip()
+                    + "\n\n_(cut short — the response got stuck repeating itself)_"
+                )
+    return text
 
 
 def _run_one_tool(tool_use: dict, tool_handlers: dict) -> dict:

@@ -115,6 +115,53 @@ async def test_chat_confirm_yes_executes_plan_and_records_deployment(client, db_
 
 
 @pytest.mark.asyncio
+async def test_free_text_confirmation_executes_plan_without_the_button(client, db_session):
+    """Regression: a user replying "confirmed" instead of clicking Yes/deploy
+    used to fall through to a plain chat turn with no way to actually deploy —
+    the model would just hallucinate having done it. Plain-English confirmation
+    on a pending plan must reach the executor exactly like confirm:true does."""
+    plan = {"plan": [{"step": 1, "action": "create", "resource_type": "s3_bucket", "config": {"Bucket": "x"}}]}
+
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(spec={"intent": "a bucket"})), \
+         patch("pipeline.orchestrator.run_architect", return_value=_arch(text="Plan ready", plan=plan)), \
+         patch("pipeline.orchestrator.run_critic", return_value=_NO_CRITIQUE):
+        first = await client.post("/api/chat", json={"message": "make a bucket"})
+    session_id = first.json()["session_id"]
+
+    exec_result = {
+        "text": "Created S3 bucket.",
+        "results": [{"success": True, "resource_type": "s3_bucket", "resource_id": "my-bucket", "name": "my-bucket"}],
+    }
+    with patch("pipeline.orchestrator.run_executor", return_value=exec_result) as mocked_exec, \
+         patch("pipeline.orchestrator.run_validator", return_value=[]), \
+         patch("pipeline.orchestrator.run_summary", return_value="Created S3 bucket."), \
+         patch("pipeline.orchestrator.run_requirements") as mocked_req:
+        # No "confirm" field at all — just what a user actually types.
+        resp = await client.post("/api/chat", json={"message": "confirmed", "session_id": session_id})
+
+    assert resp.status_code == 200
+    mocked_exec.assert_called_once()
+    mocked_req.assert_not_called()  # never fell through to the front-door chat agent
+
+    result = await db_session.execute(select(SessionModel).where(SessionModel.id == session_id))
+    assert result.scalars().one().pending_plan is None
+
+
+@pytest.mark.asyncio
+async def test_free_text_matching_a_keyword_without_a_pending_plan_is_ordinary_chat(client, db_session):
+    """The exact-match phrases only trigger against a genuinely pending plan —
+    with none pending, "confirmed" is just a message like any other."""
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="Not sure what you mean.")) as mocked, \
+         patch("pipeline.orchestrator.run_architect") as m_arch:
+        resp = await client.post("/api/chat", json={"message": "confirmed"})
+
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "Not sure what you mean."
+    mocked.assert_called_once()
+    m_arch.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_chat_confirm_no_cancels_plan_without_executing(client, db_session):
     plan = {"plan": [{"step": 1, "action": "delete", "resource_type": "ec2_instance", "resource_id": "i-1"}]}
 
@@ -190,6 +237,83 @@ async def test_chat_stream_emits_progress_events_then_final(client, db_session):
     # finalize_node adds estimated_monthly_cost/cost_breakdown on top — the steps
     # the architect proposed persist unchanged.
     assert result.scalars().one().pending_plan["plan"] == plan["plan"]  # streamed turn still persists
+
+
+@pytest.mark.asyncio
+async def test_chat_cancel_marks_session_for_stop_when_owned(client, db_session):
+    from routes import chat as chat_route
+
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="hi")):
+        first = await client.post("/api/chat", json={"message": "hi"})
+    session_id = first.json()["session_id"]
+    chat_route._cancel_requested.discard(session_id)
+
+    resp = await client.post("/api/chat/cancel", json={"session_id": session_id})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert session_id in chat_route._cancel_requested
+    chat_route._cancel_requested.discard(session_id)  # cleanup — module-level state
+
+
+@pytest.mark.asyncio
+async def test_chat_cancel_is_a_silent_noop_for_an_unowned_session(client):
+    """Same non-leaking posture as session_id elsewhere in this file: never
+    reveal via status code whether a session_id exists for someone else."""
+    from routes import chat as chat_route
+
+    fake_id = "00000000-0000-0000-0000-000000000000"
+    resp = await client.post("/api/chat/cancel", json={"session_id": fake_id})
+
+    assert resp.status_code == 200
+    assert fake_id not in chat_route._cancel_requested
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_cancellation_stops_early_and_persists_nothing(client, db_session):
+    """End-to-end: a stop request landing mid-turn halts the graph before it
+    reaches a persistable outcome, and nothing from the interrupted turn (not
+    even an unvalidated plan proposal) is written to the session."""
+    from routes import chat as chat_route
+
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(text="hi")):
+        first = await client.post("/api/chat", json={"message": "hi"})
+    session_id = first.json()["session_id"]
+    chat_route._cancel_requested.discard(session_id)
+
+    spec = {"intent": "a cache"}
+    # rds_instance isn't free-tier — Tier-1 validation would normally send this
+    # back to the architect for a refinement round, which must never happen
+    # once cancelled.
+    bad_plan = {"plan": [{"action": "create", "resource_type": "rds_instance", "config": {}}]}
+
+    def cancel_from_within_architect(*a, **kw):
+        # Equivalent to a concurrent POST /chat/cancel landing while this turn
+        # is mid-flight — set directly rather than via a second HTTP call since
+        # this mock runs synchronously inside the turn's own worker thread.
+        chat_route._cancel_requested.add(session_id)
+        return _arch(plan=bad_plan)
+
+    with patch("pipeline.orchestrator.run_requirements", return_value=_req(spec=spec)), \
+         patch("pipeline.orchestrator.run_architect", side_effect=cancel_from_within_architect) as m_arch, \
+         patch("pipeline.orchestrator.run_critic", return_value=_NO_CRITIQUE):
+        events = []
+        async with client.stream(
+            "POST", "/api/chat/stream", json={"message": "build a cache", "session_id": session_id}
+        ) as resp:
+            assert resp.status_code == 200
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[len("data: "):]))
+
+    types = [e["type"] for e in events]
+    assert "cancelled" in types
+    assert "final" not in types
+    m_arch.assert_called_once()  # the validate→architect refinement round never ran
+
+    result = await db_session.execute(select(SessionModel).where(SessionModel.id == session_id))
+    assert result.scalars().one().pending_plan is None
+    chat_route._cancel_requested.discard(session_id)  # cleanup
 
 
 @pytest.mark.asyncio
