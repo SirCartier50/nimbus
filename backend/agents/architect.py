@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from agents.inspection import INSPECTION_TOOL_CONFIG, build_handlers
 from utils.tool_use import run_tool_loop
@@ -57,6 +58,8 @@ IMPORTANT RULES:
 - Always use your tools to check current state BEFORE planning (e.g., check if a resource already exists)
 - Make bucket/table/function names globally or account-wide unique by appending random characters
 - For destructive actions (delete, terminate), clearly warn the user what will be lost
+- The <nimbus-plan> block MUST be strictly valid JSON — no "#" or "//" comments, no trailing commas.
+  If a field needs explaining, put that in the natural-language explanation, not inside the JSON.
 """
 
 # Curated-vs-generic preference (Bitter-Lesson knob, PROD/DECISIONS.md). The curated
@@ -145,12 +148,55 @@ def run_architect(
     }
 
 
+def _strip_json_comments(s: str) -> str:
+    """Best-effort removal of `#`/`//` line comments and trailing commas from
+    LLM-emitted "JSON" — despite the system prompt forbidding them, the model
+    has produced blocks like `"ImageId": "ami-...", # Amazon Linux 2` (valid
+    Python/YAML-ish style, invalid JSON), which used to send the whole raw
+    <nimbus-plan> block to the user instead of a parsed plan. Only strips
+    outside of string literals so a legit value containing "#" or "//" (an
+    S3 key, a URL) survives untouched.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if in_string:
+            out.append(c)
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+        elif c == "#" or (c == "/" and s[i + 1 : i + 2] == "/"):
+            while i < n and s[i] != "\n":
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+
+    cleaned = "".join(out)
+    # Trailing commas before a closing bracket are never valid JSON either.
+    return re.sub(r",(\s*[}\]])", r"\1", cleaned)
+
+
 def extract_plan(text: str) -> tuple[str, dict | None]:
     """Split a model response into (display_text, plan). The model wraps a JSON
     plan in <nimbus-plan> tags inline with its natural-language explanation;
     this pulls the JSON out and strips the tags from what the user sees.
     Returns (text, None) unchanged if there's no plan block, or if the block
-    is present but isn't valid JSON (the model hallucinated malformed tags).
+    is present but isn't valid JSON even after comment-stripping (the model
+    hallucinated malformed tags).
     """
     if "<nimbus-plan>" not in text or "</nimbus-plan>" not in text:
         return text, None
@@ -159,7 +205,10 @@ def extract_plan(text: str) -> tuple[str, dict | None]:
         plan_start = text.index("<nimbus-plan>") + len("<nimbus-plan>")
         plan_end = text.index("</nimbus-plan>")
         plan_json = text[plan_start:plan_end].strip()
-        plan = json.loads(plan_json)
+        try:
+            plan = json.loads(plan_json)
+        except json.JSONDecodeError:
+            plan = json.loads(_strip_json_comments(plan_json))
 
         display_text = text[:text.index("<nimbus-plan>")].strip()
         tail_start = text.index("</nimbus-plan>") + len("</nimbus-plan>")
