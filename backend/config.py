@@ -21,8 +21,20 @@ logger = logging.getLogger("config")
 # the matching <PROVIDER>_MODEL env var (see get_provider in utils/llm). Keep
 # these to smart, tool-capable models (the product needs reliable tool calling —
 # ~70B+ / equivalent); a model that can't call tools will silently fail here.
+#
+# openrouter was "meta-llama/llama-3.3-70b-instruct" — discovered live (2026-08-27)
+# that OpenRouter pulled the free ":free" variant of that model; the bare slug is
+# the PAID one ($0.10/$0.32 per M tokens), so every turn was quietly spending the
+# operator's real money against this project's free-tier-only policy. Verified
+# nvidia/nemotron-3-super-120b-a12b:free is currently free AND actually completes
+# a real tool-call round trip (checked directly against OpenRouter, not just its
+# metadata) — swapped to that. Re-verify before ever changing this again: a model
+# merely listing "tools" as a supported parameter isn't the same as reliably using
+# one (nemotron-3-ultra-550b-a55b:free also works but is larger/slower for no
+# observed reliability gain; z-ai/glm-5.2:free was upstream-rate-limited on the
+# very first test call — avoid as a default despite being free).
 MODEL_DEFAULTS = {
-    "openrouter": "meta-llama/llama-3.3-70b-instruct",
+    "openrouter": "nvidia/nemotron-3-super-120b-a12b:free",
     "groq": "llama-3.3-70b-versatile",
     "huggingface": "deepseek-ai/DeepSeek-V3-0324",
 }
